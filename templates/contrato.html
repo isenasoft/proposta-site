@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Novo Contrato</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+
+<h2>Novo Contrato</h2>
+
+<form method="POST">
+
+  <label>Denominação (Nome):</label><br>
+  <input type="text" name="denominacao" required><br><br>
+
+  <label>CPF/CNPJ:</label><br>
+  <input type="text" name="cpf_cnpj" required><br><br>
+
+  <label>Endereço:</label><br>
+  <input type="text" name="endereco" required><br><br>
+
+  <label>Telefone:</label><br>
+  <input type="text" name="telefone" required><br><br>
+
+  <label>Email:</label><br>
+  <input type="email" name="email" required><br><br>
+
+  <label>Equipamento:</label><br>
+  <input type="text" name="equipamento" required><br><br>
+
+  <label>Acessórios:</label><br>
+  <input type="text" name="acessorios" required><br><br>
+
+  <label>Data início (DDMMAAAA):</label><br>
+  <input type="text" name="data_inicio" inputmode="numeric" maxlength="10" placeholder="20/02/2026" required><br><br>
+
+  <label>Data término (DDMMAAAA):</label><br>
+  <input type="text" name="data_termino" inputmode="numeric" maxlength="10" placeholder="20/02/2027" required><br><br>
+
+  <label>Franquia (número):</label><br>
+  <input type="number" name="franquia" required><br><br>
+
+  <label>Valor mensal (ex: 200):</label><br>
+  <input type="number" name="valor_mensal" step="0.01" required><br><br>
+
+  <button type="submit">Gerar Contrato (PDF)</button>
+
+</form>
+
+<script>
+  function maskDate(el){
+    el.addEventListener('input', () => {
+      let v = el.value.replace(/\D/g,'').slice(0,8);
+      if (v.length >= 5) el.value = v.slice(0,2) + '/' + v.slice(2,4) + '/' + v.slice(4);
+      else if (v.length >= 3) el.value = v.slice(0,2) + '/' + v.slice(2);
+      else el.value = v;
+    });
+  }
+  maskDate(document.querySelector('input[name="data_inicio"]'));
+  maskDate(document.querySelector('input[name="data_termino"]'));
+</script>
+
+</body>
+</html>
