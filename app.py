@@ -4,11 +4,18 @@ from docx.shared import Mm
 from datetime import datetime
 from num2words import num2words
 from pathlib import Path
-import os, re, tempfile, subprocess
+import os
+import re
+import tempfile
+import subprocess
 
 app = Flask(__name__)
+
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# ================= FUNÇÕES GERAIS =================
 
 def data_formatada():
     meses = {
@@ -18,19 +25,35 @@ def data_formatada():
     hoje = datetime.now()
     return f"{hoje.day} de {meses[hoje.month]} de {hoje.year}"
 
+
 def limpar_nome_arquivo(txt: str) -> str:
     txt = (txt or "").strip()
     txt = re.sub(r"[\\/:*?\"<>|]+", "", txt)
     txt = re.sub(r"\s+", " ", txt)
     return txt[:80] if txt else "Cliente"
 
+
 def docx_para_pdf(docx_path: str, out_dir: str) -> str:
+    env = os.environ.copy()
+    user_install = f"file://{out_dir}/lo-profile"
+
     subprocess.run(
-        ["soffice", "--headless", "--nologo", "--nolockcheck",
-         "--convert-to", "pdf", "--outdir", out_dir, docx_path],
-        check=True
+        [
+            "soffice",
+            "--headless",
+            "--nologo",
+            "--nolockcheck",
+            f"-env:UserInstallation={user_install}",
+            "--convert-to", "pdf:writer_pdf_Export",
+            "--outdir", out_dir,
+            docx_path
+        ],
+        check=True,
+        env=env
     )
+
     return str(Path(out_dir) / (Path(docx_path).stem + ".pdf"))
+
 
 def formatar_valor_reais(valor):
     v = float(valor)
@@ -38,26 +61,33 @@ def formatar_valor_reais(valor):
     ext = num2words(int(round(v)), lang="pt_BR")
     return f"R$ {v_fmt} ({ext} reais)"
 
+
 def so_digitos(s: str) -> str:
     return re.sub(r"\D+", "", s or "")
+
 
 def data_extenso_por_digitos(ddmmaaaa: str) -> str:
     v = so_digitos(ddmmaaaa)
     if len(v) != 8:
         raise ValueError("Data inválida (use DDMMAAAA)")
-    dia = int(v[0:2]); mes = int(v[2:4]); ano = int(v[4:8])
+    dia = int(v[0:2])
+    mes = int(v[2:4])
+    ano = int(v[4:8])
     meses = {
         1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",
         7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"
     }
     return f"{dia} de {meses[mes]} de {ano}"
 
+
 def formatar_inteiro_ptbr(n: int) -> str:
     return f"{n:,}".replace(",", ".")
+
 
 def franquia_formatada_e_extenso(valor: str):
     n = int(so_digitos(valor))
     return formatar_inteiro_ptbr(n), num2words(n, lang="pt_BR")
+
 
 def valor_formatado_e_extenso(valor: str):
     v = float(valor)
@@ -66,13 +96,15 @@ def valor_formatado_e_extenso(valor: str):
     return v_fmt, ext
 
 
+# ================= ROTAS =================
+
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
-# ---------------- PROPOSTA ----------------
-@app.route("/proposta", methods=["GET","POST"])
+# ---------- PROPOSTA ----------
+@app.route("/proposta", methods=["GET", "POST"])
 def proposta():
     if request.method == "POST":
         cliente = request.form["cliente"]
@@ -106,13 +138,17 @@ def proposta():
             pdf_saida = docx_para_pdf(docx_saida, tmp)
 
             nome = limpar_nome_arquivo(cliente)
-            return send_file(pdf_saida, as_attachment=True, download_name=f"Proposta - {nome}.pdf")
+            return send_file(
+                pdf_saida,
+                as_attachment=True,
+                download_name=f"Proposta - {nome}.pdf"
+            )
 
     return render_template("proposta.html")
 
 
-# ---------------- CONTRATO ----------------
-@app.route("/contrato", methods=["GET","POST"])
+# ---------- CONTRATO ----------
+@app.route("/contrato", methods=["GET", "POST"])
 def contrato():
     if request.method == "POST":
         denominacao = request.form["denominacao"]
@@ -156,7 +192,11 @@ def contrato():
             pdf_saida = docx_para_pdf(docx_saida, tmp)
 
             nome = limpar_nome_arquivo(denominacao)
-            return send_file(pdf_saida, as_attachment=True, download_name=f"Contrato - {nome}.pdf")
+            return send_file(
+                pdf_saida,
+                as_attachment=True,
+                download_name=f"Contrato - {nome}.pdf"
+            )
 
     return render_template("contrato.html")
 
