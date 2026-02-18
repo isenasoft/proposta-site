@@ -1,2 +1,10 @@
 [phases.setup]
-aptPkgs = ["libreoffice"]
+aptPkgs = [
+  "libreoffice",
+  "fonts-dejavu",
+  "fonts-liberation",
+  "fonts-freefont-ttf",
+  "fonts-noto",
+  "fonts-crosextra-carlito",
+  "fonts-crosextra-caladea"
+]
