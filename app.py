@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, send_file
-from docxtpl import DocxTemplate
+from docxtpl import DocxTemplate, InlineImage
+from docx.shared import Mm
 from datetime import datetime
 from num2words import num2words
 import os
@@ -18,8 +19,9 @@ def data_formatada():
 
 def formatar_valor(valor):
     valor_float = float(valor)
-    extenso = num2words(valor_float, lang='pt_BR')
-    return f"R$ {valor_float:,.2f}".replace(",", "X").replace(".", ",").replace("X",".") + f" ({extenso} reais)"
+    extenso = num2words(int(valor_float), lang='pt_BR')
+    valor_formatado = f"{valor_float:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+    return f"R$ {valor_formatado} ({extenso} reais)"
 
 @app.route("/")
 def index():
@@ -39,7 +41,28 @@ def proposta():
         imagem.save(imagem_path)
 
         doc = DocxTemplate("template.docx")
+
+        imagem_doc = InlineImage(doc, imagem_path, width=Mm(80))
+
         context = {
             "DATA": data_formatada(),
             "CLIENTE": cliente,
             "CPF": cpf,
+            "MODELO": modelo,
+            "FRANQUIA": franquia,
+            "VALOR": valor,
+            "IMAGEM": imagem_doc
+        }
+
+        doc.render(context)
+        arquivo_saida = "proposta_gerada.docx"
+        doc.save(arquivo_saida)
+
+        return send_file(arquivo_saida, as_attachment=True)
+
+    return render_template("proposta.html")
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
