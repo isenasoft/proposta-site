@@ -1,0 +1,6 @@
+Flask
+gunicorn
+docxtpl
+python-docx
+num2words
+psycopg2-binary
