@@ -5,20 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
 <body>
-    <h2>Nova Proposta</h2>
 
-    <form method="POST" enctype="multipart/form-data">
+<h2>Nova Proposta</h2>
 
-        <label>Cliente:</label><br>
-        <input type="text" name="cliente" required><br><br>
+<form method="POST" enctype="multipart/form-data">
 
-        <label>CPF/CNPJ:</label><br>
-        <input type="text" name="cpf" required><br><br>
+    <label>Cliente:</label><br>
+    <input type="text" name="cliente" required><br><br>
 
-        <label>Modelo Impressora:</label><br>
-        <input type="text" name="modelo" required><br><br>
+    <label>CPF/CNPJ:</label><br>
+    <input type="text" name="cpf" required><br><br>
 
-        <label>Franquia (pág/mês):</label><br>
-        <input type="number" name="franquia" required><br><br>
+    <label>Modelo Impressora:</label><br>
+    <input type="text" name="modelo" required><br><br>
 
-        <label
+    <label>Franquia (pág/mês):</label><br>
+    <input type="number" name="franquia" required><br><br>
+
+    <label>Valor:</label><br>
+    <input type="number" name="valor" step="0.01" required><br><br>
+
+    <label>Imagem da Impressora:</label><br>
+    <input type="file" name="imagem" accept="image/*" required><br><br>
+
+    <button type="submit">Gerar Proposta</button>
+
+</form>
+
+</body>
+</html>
