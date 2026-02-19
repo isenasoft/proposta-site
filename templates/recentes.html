@@ -20,6 +20,13 @@
         <a href="/proposta_pdf/{{ p.id }}">Baixar PDF</a>
         &nbsp;|&nbsp;
         <a href="/contrato_de_proposta/{{ p.id }}">Gerar Contrato</a>
+        &nbsp;|&nbsp;
+
+        <form method="POST" action="/proposta_delete/{{ p.id }}" style="display:inline;">
+          <button type="submit" onclick="return confirm('Excluir esta proposta?')">
+            Excluir
+          </button>
+        </form>
       </li>
     {% endfor %}
   </ul>
