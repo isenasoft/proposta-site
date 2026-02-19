@@ -1,37 +1,41 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-    <title>Nova Proposta</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8">
+  <title>Nova Proposta</title>
 </head>
 <body>
+  <h1>Nova Proposta</h1>
 
-<h2>Nova Proposta</h2>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <p style="color:red;">{{ messages[0] }}</p>
+    {% endif %}
+  {% endwith %}
 
-<form method="POST" enctype="multipart/form-data">
+  <form method="POST" enctype="multipart/form-data">
+    Cliente:<br>
+    <input type="text" name="cliente" value="{{ (prefill.cliente if prefill else '') }}" required><br><br>
 
-    <label>Cliente:</label><br>
-    <input type="text" name="cliente" required><br><br>
+    CPF/CNPJ:<br>
+    <input type="text" name="cpf" value="{{ (prefill.cpf if prefill else '') }}" required><br><br>
 
-    <label>CPF/CNPJ:</label><br>
-    <input type="text" name="cpf" required><br><br>
+    Modelo Impressora:<br>
+    <input type="text" name="modelo" value="{{ (prefill.modelo if prefill else '') }}" required><br><br>
 
-    <label>Modelo Impressora:</label><br>
-    <input type="text" name="modelo" required><br><br>
+    Franquia (número):<br>
+    <input type="text" name="franquia" value="{{ (prefill.franquia if prefill else '') }}" required><br><br>
 
-    <label>Franquia (pág/mês):</label><br>
-    <input type="number" name="franquia" required><br><br>
+    Valor mensal (ex: 150 ou 150,00):<br>
+    <input type="text" name="valor" value="{{ (prefill.valor if prefill else '') }}" required><br><br>
 
-    <label>Valor:</label><br>
-    <input type="number" name="valor" step="0.01" required><br><br>
+    Imagem (opcional):<br>
+    <input type="file" name="imagem" accept="image/*"><br><br>
 
-    <label>Imagem da Impressora:</label><br>
-    <input type="file" name="imagem" accept="image/*" required><br><br>
+    <button type="submit">Gerar Proposta (PDF)</button>
+  </form>
 
-    <button type="submit">Gerar Proposta</button>
-
-</form>
-
+  <br>
+  <a href="/">← Voltar</a>
 </body>
 </html>
-<p><a href="/">⬅ Voltar</a></p>
