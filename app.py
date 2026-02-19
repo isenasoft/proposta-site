@@ -49,7 +49,7 @@ def init_db():
 def limpar_propostas_expiradas():
     init_db()
     with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM propostas WHERE criado_em < NOW() - INTERVAL '10 days';")
+        cur.execute("DELETE FROM propostas WHERE created_at < NOW() - INTERVAL '10 days';")
         conn.commit()
 
 
