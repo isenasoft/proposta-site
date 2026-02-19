@@ -15,7 +15,7 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# ================= FUNÇÕES GERAIS =================
+# ================= FUNÇÕES =================
 
 def data_formatada():
     meses = {
@@ -93,7 +93,7 @@ def valor_formatado_e_extenso(valor: str):
     v = float(valor)
     v_fmt = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
     ext = num2words(int(round(v)), lang="pt_BR")
-    return v_fmt, ext
+    return v_fmt, f"{ext} reais"
 
 
 # ================= ROTAS =================
