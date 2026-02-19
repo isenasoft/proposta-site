@@ -8,11 +8,52 @@ import os
 import re
 import tempfile
 import subprocess
+import psycopg2
+import psycopg2.extras
+from io import BytesIO
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# ================= BANCO (Postgres Railway) =================
+
+def db_conn():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL não encontrada (adicione o PostgreSQL no Railway).")
+    # alguns ambientes usam postgres:// (ok), mas garantimos compatibilidade
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url)
+
+def db_init():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS propostas (
+            id SERIAL PRIMARY KEY,
+            cliente TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            pdf BYTEA NOT NULL
+        );
+        """)
+        conn.commit()
+
+def limpar_propostas_expiradas():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM propostas WHERE created_at < NOW() - INTERVAL '10 days';")
+        conn.commit()
+
+@app.before_request
+def _housekeeping():
+    try:
+        db_init()
+        limpar_propostas_expiradas()
+    except Exception:
+        # se o banco estiver fora do ar momentaneamente, não derruba o site
+        pass
 
 
 # ================= FUNÇÕES =================
@@ -25,18 +66,15 @@ def data_formatada():
     hoje = datetime.now()
     return f"{hoje.day} de {meses[hoje.month]} de {hoje.year}"
 
-
 def limpar_nome_arquivo(txt: str) -> str:
     txt = (txt or "").strip()
     txt = re.sub(r"[\\/:*?\"<>|]+", "", txt)
     txt = re.sub(r"\s+", " ", txt)
     return txt[:80] if txt else "Cliente"
 
-
 def docx_para_pdf(docx_path: str, out_dir: str) -> str:
     env = os.environ.copy()
     user_install = f"file://{out_dir}/lo-profile"
-
     subprocess.run(
         [
             "soffice",
@@ -51,9 +89,7 @@ def docx_para_pdf(docx_path: str, out_dir: str) -> str:
         check=True,
         env=env
     )
-
     return str(Path(out_dir) / (Path(docx_path).stem + ".pdf"))
-
 
 def formatar_valor_reais(valor):
     v = float(valor)
@@ -61,10 +97,8 @@ def formatar_valor_reais(valor):
     ext = num2words(int(round(v)), lang="pt_BR")
     return f"R$ {v_fmt} ({ext} reais)"
 
-
 def so_digitos(s: str) -> str:
     return re.sub(r"\D+", "", s or "")
-
 
 def data_extenso_por_digitos(ddmmaaaa: str) -> str:
     v = so_digitos(ddmmaaaa)
@@ -79,15 +113,12 @@ def data_extenso_por_digitos(ddmmaaaa: str) -> str:
     }
     return f"{dia} de {meses[mes]} de {ano}"
 
-
 def formatar_inteiro_ptbr(n: int) -> str:
     return f"{n:,}".replace(",", ".")
-
 
 def franquia_formatada_e_extenso(valor: str):
     n = int(so_digitos(valor))
     return formatar_inteiro_ptbr(n), num2words(n, lang="pt_BR")
-
 
 def valor_formatado_e_extenso(valor: str):
     v = float(valor)
@@ -103,7 +134,7 @@ def index():
     return render_template("index.html")
 
 
-# ---------- PROPOSTA ----------
+# ---------- PROPOSTA (gera PDF e salva no banco por 10 dias) ----------
 @app.route("/proposta", methods=["GET", "POST"])
 def proposta():
     if request.method == "POST":
@@ -135,11 +166,25 @@ def proposta():
             doc.render(context)
             doc.save(docx_saida)
 
-            pdf_saida = docx_para_pdf(docx_saida, tmp)
+            pdf_path = docx_para_pdf(docx_saida, tmp)
+
+            # lê o pdf e salva no banco
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+
+            try:
+                with db_conn() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO propostas (cliente, pdf) VALUES (%s, %s);",
+                        (cliente, psycopg2.Binary(pdf_bytes))
+                    )
+                    conn.commit()
+            except Exception:
+                pass
 
             nome = limpar_nome_arquivo(cliente)
             return send_file(
-                pdf_saida,
+                pdf_path,
                 as_attachment=True,
                 download_name=f"Proposta - {nome}.pdf"
             )
@@ -147,8 +192,47 @@ def proposta():
     return render_template("proposta.html")
 
 
+# ---------- RECENTES ----------
+@app.route("/recentes")
+def recentes():
+    limpar_propostas_expiradas()
+    propostas = []
+    with db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("SELECT id, cliente, created_at FROM propostas ORDER BY created_at DESC;")
+        rows = cur.fetchall()
+        for r in rows:
+            propostas.append({
+                "id": r["id"],
+                "cliente": r["cliente"],
+                "data": r["created_at"].strftime("%d/%m/%Y %H:%M")
+            })
+    return render_template("recentes.html", propostas=propostas)
+
+
+# ---------- BAIXAR PDF SALVO ----------
+@app.route("/proposta_pdf/<int:pid>")
+def proposta_pdf(pid):
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT cliente, pdf FROM propostas WHERE id=%s;", (pid,))
+        row = cur.fetchone()
+        if not row:
+            return "Proposta não encontrada (talvez expirou).", 404
+
+        cliente, pdf_bytes = row[0], row[1]
+        nome = limpar_nome_arquivo(cliente)
+
+        bio = BytesIO(pdf_bytes.tobytes() if hasattr(pdf_bytes, "tobytes") else bytes(pdf_bytes))
+        bio.seek(0)
+        return send_file(
+            bio,
+            as_attachment=True,
+            download_name=f"Proposta - {nome}.pdf",
+            mimetype="application/pdf"
+        )
+
+
 # ---------- CONTRATO ----------
-@app.route("/contrato", methods=["GET", "POST"])
+@app.route("/contrato", methods=["GET","POST"])
 def contrato():
     if request.method == "POST":
         denominacao = request.form["denominacao"]
