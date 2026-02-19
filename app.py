@@ -179,6 +179,18 @@ def proposta():
 
             pdf_path = docx_para_pdf(docx_saida, tmp)
             pdf_bytes = open(pdf_path, "rb").read()
+            @app.route("/proposta_view/<int:pid>")
+def proposta_view(pid):
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT pdf FROM propostas WHERE id=%s;", (pid,))
+        row = cur.fetchone()
+        if not row:
+            return "Proposta não encontrada (talvez expirou).", 404
+
+        pdf_bytes = row[0]
+        bio = BytesIO(pdf_bytes.tobytes() if hasattr(pdf_bytes, "tobytes") else bytes(pdf_bytes))
+        bio.seek(0)
+        return send_file(bio, mimetype="application/pdf")
 
             # salva no banco
             db_init()
