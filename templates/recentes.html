@@ -1,41 +1,14 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Propostas Recentes</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body>
+{% for p in propostas %}
+  <div style="margin-bottom:12px;">
+    <b>{{ p.cliente }}</b> — {{ p.criado_em }}
 
-<h2>Propostas Recentes (10 dias)</h2>
+    <a href="/proposta_view/{{ p.id }}" target="_blank">Visualizar</a> |
+    <a href="/proposta_download/{{ p.id }}">Baixar</a> |
 
-{% if propostas|length == 0 %}
-  <p>Nenhuma proposta salva.</p>
-{% else %}
-  <ul>
-    {% for p in propostas %}
-      <li style="margin-bottom:16px;">
-        <b>{{ p.cliente }}</b><br>
-        {{ p.data }}<br><br>
+    <form action="/proposta_delete/{{ p.id }}" method="post" style="display:inline;">
+      <button type="submit">Excluir</button>
+    </form>
 
-        <a href="/proposta_pdf/{{ p.id }}">Baixar PDF</a>
-        &nbsp;|&nbsp;
-        <a href="/contrato_de_proposta/{{ p.id }}">Gerar Contrato</a>
-        &nbsp;|&nbsp;
-
-        <form method="POST" action="/proposta_delete/{{ p.id }}" style="display:inline;">
-          <button type="submit" onclick="return confirm('Excluir esta proposta?')">
-            Excluir
-          </button>
-        </form>
-      </li>
-    {% endfor %}
-  </ul>
-{% endif %}
-
-<p><a href="/">⬅ Voltar</a></p>
-
-  <a href="/proposta_view/{{ p.id }}" target="_blank">Visualizar</a>
-&nbsp;|&nbsp;
-
-</body>
-</html>
+    | <a href="/contrato?proposta_id={{ p.id }}">Gerar Contrato</a>
+  </div>
+{% endfor %}
