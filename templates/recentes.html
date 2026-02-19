@@ -13,16 +13,19 @@
 {% else %}
   <ul>
     {% for p in propostas %}
-      <li style="margin-bottom:12px;">
+      <li style="margin-bottom:16px;">
         <b>{{ p.cliente }}</b><br>
-        {{ p.data }}<br>
+        {{ p.data }}<br><br>
+
         <a href="/proposta_pdf/{{ p.id }}">Baixar PDF</a>
+        &nbsp;|&nbsp;
+        <a href="/contrato_de_proposta/{{ p.id }}">Gerar Contrato</a>
       </li>
     {% endfor %}
   </ul>
 {% endif %}
 
-<p><a href="/">Voltar</a></p>
+<p><a href="/">⬅ Voltar</a></p>
 
 </body>
 </html>
