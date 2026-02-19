@@ -8,13 +8,13 @@
 
 <h2>Novo Contrato</h2>
 
-<form method="POST">
+<form method="POST" action="/contrato">
 
   <label>Denominação (Nome):</label><br>
-  <input type="text" name="denominacao" required><br><br>
+  <input type="text" name="denominacao" value="{{ prefill.denominacao or '' }}" required><br><br>
 
   <label>CPF/CNPJ:</label><br>
-  <input type="text" name="cpf_cnpj" required><br><br>
+  <input type="text" name="cpf_cnpj" value="{{ prefill.cpf_cnpj or '' }}" required><br><br>
 
   <label>Endereço:</label><br>
   <input type="text" name="endereco" required><br><br>
@@ -26,7 +26,7 @@
   <input type="email" name="email" required><br><br>
 
   <label>Equipamento:</label><br>
-  <input type="text" name="equipamento" required><br><br>
+  <input type="text" name="equipamento" value="{{ prefill.equipamento or '' }}" required><br><br>
 
   <label>Acessórios:</label><br>
   <input type="text" name="acessorios" required><br><br>
@@ -38,14 +38,16 @@
   <input type="text" name="data_termino" inputmode="numeric" maxlength="10" placeholder="20/02/2027" required><br><br>
 
   <label>Franquia (número):</label><br>
-  <input type="number" name="franquia" required><br><br>
+  <input type="number" name="franquia" value="{{ prefill.franquia or '' }}" required><br><br>
 
   <label>Valor mensal (ex: 200):</label><br>
-  <input type="number" name="valor_mensal" step="0.01" required><br><br>
+  <input type="number" name="valor_mensal" step="0.01" value="{{ prefill.valor_mensal or '' }}" required><br><br>
 
   <button type="submit">Gerar Contrato (PDF)</button>
 
 </form>
+
+<p><a href="/">⬅ Voltar</a></p>
 
 <script>
   function maskDate(el){
