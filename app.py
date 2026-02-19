@@ -18,13 +18,12 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# ================= BANCO (Postgres Railway) =================
+# ================= BANCO =================
 
 def db_conn():
     url = os.environ.get("DATABASE_URL")
     if not url:
-        raise RuntimeError("DATABASE_URL não encontrada (adicione o PostgreSQL no Railway).")
-    # alguns ambientes usam postgres:// (ok), mas garantimos compatibilidade
+        raise RuntimeError("DATABASE_URL não encontrada.")
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     return psycopg2.connect(url)
@@ -39,6 +38,11 @@ def db_init():
             pdf BYTEA NOT NULL
         );
         """)
+        # novos campos p/ gerar contrato a partir da proposta
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS cpf TEXT;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS modelo TEXT;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS franquia INTEGER;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS valor NUMERIC;")
         conn.commit()
 
 def limpar_propostas_expiradas():
@@ -52,7 +56,6 @@ def _housekeeping():
         db_init()
         limpar_propostas_expiradas()
     except Exception:
-        # se o banco estiver fora do ar momentaneamente, não derruba o site
         pass
 
 
@@ -141,8 +144,9 @@ def proposta():
         cliente = request.form["cliente"]
         cpf = request.form["cpf"]
         modelo = request.form["modelo"]
-        franquia = request.form["franquia"]
-        valor = formatar_valor_reais(request.form["valor"])
+        franquia_raw = request.form["franquia"]
+        valor_raw = request.form["valor"]
+        valor_txt = formatar_valor_reais(valor_raw)
         imagem = request.files["imagem"]
 
         imagem_path = os.path.join(UPLOAD_FOLDER, imagem.filename)
@@ -156,8 +160,8 @@ def proposta():
             "CLIENTE": cliente,
             "CPF": cpf,
             "MODELO": modelo,
-            "FRANQUIA": franquia,
-            "VALOR": valor,
+            "FRANQUIA": franquia_raw,
+            "VALOR": valor_txt,
             "IMAGEM": imagem_doc
         }
 
@@ -168,26 +172,25 @@ def proposta():
 
             pdf_path = docx_para_pdf(docx_saida, tmp)
 
-            # lê o pdf e salva no banco
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
+            # salva no banco (PDF + dados base p/ contrato)
             try:
+                franquia_int = int(so_digitos(franquia_raw)) if so_digitos(franquia_raw) else None
+                valor_num = float(valor_raw)
+
                 with db_conn() as conn, conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO propostas (cliente, pdf) VALUES (%s, %s);",
-                        (cliente, psycopg2.Binary(pdf_bytes))
+                        "INSERT INTO propostas (cliente, cpf, modelo, franquia, valor, pdf) VALUES (%s, %s, %s, %s, %s, %s);",
+                        (cliente, cpf, modelo, franquia_int, valor_num, psycopg2.Binary(pdf_bytes))
                     )
                     conn.commit()
             except Exception:
                 pass
 
             nome = limpar_nome_arquivo(cliente)
-            return send_file(
-                pdf_path,
-                as_attachment=True,
-                download_name=f"Proposta - {nome}.pdf"
-            )
+            return send_file(pdf_path, as_attachment=True, download_name=f"Proposta - {nome}.pdf")
 
     return render_template("proposta.html")
 
@@ -223,12 +226,27 @@ def proposta_pdf(pid):
 
         bio = BytesIO(pdf_bytes.tobytes() if hasattr(pdf_bytes, "tobytes") else bytes(pdf_bytes))
         bio.seek(0)
-        return send_file(
-            bio,
-            as_attachment=True,
-            download_name=f"Proposta - {nome}.pdf",
-            mimetype="application/pdf"
-        )
+        return send_file(bio, as_attachment=True, download_name=f"Proposta - {nome}.pdf", mimetype="application/pdf")
+
+
+# ---------- ABRIR CONTRATO PRÉ-PREENCHIDO (a partir da proposta) ----------
+@app.route("/contrato_de_proposta/<int:pid>")
+def contrato_de_proposta(pid):
+    with db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute("SELECT cliente, cpf, modelo, franquia, valor FROM propostas WHERE id=%s;", (pid,))
+        r = cur.fetchone()
+        if not r:
+            return "Proposta não encontrada (talvez expirou).", 404
+
+        prefill = {
+            "denominacao": r["cliente"] or "",
+            "cpf_cnpj": r["cpf"] or "",
+            "equipamento": r["modelo"] or "",
+            "franquia": str(r["franquia"] or ""),
+            "valor_mensal": str(r["valor"] or ""),
+        }
+
+    return render_template("contrato.html", prefill=prefill)
 
 
 # ---------- CONTRATO ----------
@@ -250,7 +268,6 @@ def contrato():
         valor_fmt, valor_ext = valor_formatado_e_extenso(request.form["valor_mensal"])
 
         doc = DocxTemplate("contrato_template.docx")
-
         context = {
             "DENOMINACAO": denominacao,
             "CPF_CNPJ": cpf_cnpj,
@@ -276,13 +293,10 @@ def contrato():
             pdf_saida = docx_para_pdf(docx_saida, tmp)
 
             nome = limpar_nome_arquivo(denominacao)
-            return send_file(
-                pdf_saida,
-                as_attachment=True,
-                download_name=f"Contrato - {nome}.pdf"
-            )
+            return send_file(pdf_saida, as_attachment=True, download_name=f"Contrato - {nome}.pdf")
 
-    return render_template("contrato.html")
+    # GET normal
+    return render_template("contrato.html", prefill={})
 
 
 if __name__ == "__main__":
