@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Propostas Recentes</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+
+<h2>Propostas Recentes (10 dias)</h2>
+
+{% if propostas|length == 0 %}
+  <p>Nenhuma proposta salva.</p>
+{% else %}
+  <ul>
+    {% for p in propostas %}
+      <li style="margin-bottom:12px;">
+        <b>{{ p.cliente }}</b><br>
+        {{ p.data }}<br>
+        <a href="/proposta_pdf/{{ p.id }}">Baixar PDF</a>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+<p><a href="/">Voltar</a></p>
+
+</body>
+</html>
