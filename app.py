@@ -11,11 +11,12 @@ from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template, request, send_file, redirect, url_for, abort, flash
 
 from docx import Document
+from docx.shared import Inches
 
 try:
     from num2words import num2words
 except Exception:
-    num2words = None  # se não tiver, ainda roda sem extenso
+    num2words = None
 
 
 app = Flask(__name__)
@@ -33,7 +34,6 @@ def db_conn():
 
 
 def init_db():
-    # Cria a tabela se não existir (não quebra se já existir)
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute("""
         CREATE TABLE IF NOT EXISTS propostas (
@@ -59,7 +59,7 @@ def salvar_proposta(cliente, cpf, modelo, franquia_int, valor_num, pdf_bytes):
         conn.commit()
 
 
-def listar_propostas(limit=50):
+def listar_propostas(limit=100):
     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT id, cliente, cpf, modelo, franquia, valor, created_at
@@ -71,7 +71,6 @@ def listar_propostas(limit=50):
 
 
 def limpar_propostas_expiradas(dias=10):
-    # apaga antigas automaticamente
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM propostas WHERE created_at < NOW() - INTERVAL %s", (f"{dias} days",))
         conn.commit()
@@ -93,39 +92,68 @@ def excluir_proposta(pid: int):
 
 
 # -----------------------------
-# DOCX helpers (mantém estilo)
+# DOCX helpers (substituição confiável)
 # -----------------------------
-def replace_in_paragraph(paragraph, mapping: dict[str, str]):
-    # substitui preservando runs
-    for key, val in mapping.items():
-        if key in paragraph.text:
-            # junta os runs, substitui, e redistribui (simples e funciona bem na maioria dos templates)
-            full = "".join(run.text for run in paragraph.runs)
-            if key not in full:
-                continue
-            full = full.replace(key, val)
-            # limpa e coloca no primeiro run
-            for run in paragraph.runs:
-                run.text = ""
-            paragraph.runs[0].text = full
+def replace_text_everywhere(doc: Document, mapping: dict[str, str]):
+    # método “confiável”: substitui no texto do parágrafo e recria em 1 run
+    # (mantém estilo do parágrafo, evita placeholders quebrados em vários runs)
+    def _replace_paragraph(p):
+        txt = p.text
+        changed = False
+        for k, v in mapping.items():
+            if k in txt:
+                txt = txt.replace(k, v)
+                changed = True
+        if changed:
+            for r in p.runs:
+                r.text = ""
+            if p.runs:
+                p.runs[0].text = txt
+            else:
+                p.add_run(txt)
 
-
-def replace_in_doc(doc: Document, mapping: dict[str, str]):
     for p in doc.paragraphs:
-        replace_in_paragraph(p, mapping)
+        _replace_paragraph(p)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    replace_in_paragraph(p, mapping)
+                    _replace_paragraph(p)
+
+
+def insert_image_at_placeholder(doc: Document, placeholder: str, image_path: str, width_inches: float = 2.2) -> bool:
+    if not image_path or not os.path.exists(image_path):
+        return False
+
+    def _handle_paragraph(p):
+        if placeholder in p.text:
+            # limpa o texto e coloca a imagem no mesmo parágrafo
+            for r in p.runs:
+                r.text = ""
+            run = p.runs[0] if p.runs else p.add_run("")
+            run.add_picture(image_path, width=Inches(width_inches))
+            return True
+        return False
+
+    for p in doc.paragraphs:
+        if _handle_paragraph(p):
+            return True
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    if _handle_paragraph(p):
+                        return True
+
+    return False
 
 
 # -----------------------------
 # PDF conversion
 # -----------------------------
 def docx_para_pdf(docx_path: str, out_dir: str) -> str:
-    # LibreOffice headless
     subprocess.run(
         ["soffice", "--headless", "--nologo", "--nolockcheck", "--convert-to", "pdf",
          "--outdir", out_dir, docx_path],
@@ -145,12 +173,8 @@ MESES = {
 
 
 def data_extenso_por_digitos(s: str) -> str:
-    """
-    Aceita: 20022026, 20/02/2026, 20-02-2026, 20/02/26
-    Retorna: 20 de fevereiro de 2026
-    """
     s = (s or "").strip()
-    s = re.sub(r"[^\d]", "", s)  # deixa só números
+    s = re.sub(r"[^\d]", "", s)
     if len(s) == 8:
         dd = int(s[0:2]); mm = int(s[2:4]); yyyy = int(s[4:8])
     elif len(s) == 6:
@@ -159,7 +183,7 @@ def data_extenso_por_digitos(s: str) -> str:
     else:
         raise ValueError("Data inválida (use DDMMAAAA, ex: 20022026).")
 
-    datetime(yyyy, mm, dd)  # valida
+    datetime(yyyy, mm, dd)
     return f"{dd} de {MESES[mm]} de {yyyy}"
 
 
@@ -172,13 +196,9 @@ def parse_int(s: str) -> int:
 
 
 def parse_money_to_decimal(s: str) -> Decimal:
-    """
-    Aceita: "150", "150,00", "150.00", "R$ 150,00"
-    Retorna Decimal('150.00')
-    """
     s = (s or "").strip()
     s = s.replace("R$", "").strip()
-    s = s.replace(".", "").replace(",", ".")  # BR -> decimal
+    s = s.replace(".", "").replace(",", ".")
     try:
         val = Decimal(s)
     except InvalidOperation:
@@ -187,7 +207,6 @@ def parse_money_to_decimal(s: str) -> Decimal:
 
 
 def brl_fmt(valor: Decimal) -> str:
-    # 150.00 -> "150,00"
     return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
@@ -198,7 +217,6 @@ def numero_por_extenso(n: int) -> str:
 
 
 def dinheiro_por_extenso(valor: Decimal) -> str:
-    # "150.00" -> "cento e cinquenta reais"
     reais = int(valor)
     if not num2words:
         return "reais"
@@ -212,11 +230,9 @@ def dinheiro_por_extenso(valor: Decimal) -> str:
 # -----------------------------
 @app.before_request
 def _startup():
-    # garante DB
     try:
         init_db()
     except Exception:
-        # não derruba tudo só por isso
         pass
 
 
@@ -230,6 +246,7 @@ def proposta():
     if request.method == "GET":
         return render_template("proposta.html")
 
+    prefill = dict(request.form)
     try:
         cliente = (request.form.get("cliente") or "").strip()
         cpf = (request.form.get("cpf") or "").strip()
@@ -245,8 +262,7 @@ def proposta():
 
         template_path = os.path.join(os.path.dirname(__file__), "template.docx")
         if not os.path.exists(template_path):
-            # fallback caso use outro nome
-            template_path = os.path.join(os.path.dirname(__file__), "contrato_template.docx")
+            raise RuntimeError("template.docx não encontrado no projeto.")
 
         doc = Document(template_path)
 
@@ -258,30 +274,37 @@ def proposta():
             "{{ VALOR }}": valor_fmt,
             "{{ DATA }}": datetime.now().strftime("%d/%m/%Y"),
         }
-        replace_in_doc(doc, mapping)
+        replace_text_everywhere(doc, mapping)
 
+        # IMAGEM: upload do formulário (opcional)
+        image_file = request.files.get("imagem")
+        image_path = None
         with tempfile.TemporaryDirectory() as tmp:
+            if image_file and image_file.filename:
+                image_path = os.path.join(tmp, "img_upload")
+                image_file.save(image_path)
+                insert_image_at_placeholder(doc, "{{ IMAGEM }}", image_path, width_inches=2.2)
+            else:
+                # fallback: se existir static/logo.png
+                static_logo = os.path.join(os.path.dirname(__file__), "static", "logo.png")
+                if os.path.exists(static_logo):
+                    insert_image_at_placeholder(doc, "{{ IMAGEM }}", static_logo, width_inches=2.2)
+
             docx_saida = os.path.join(tmp, "proposta_gerada.docx")
             doc.save(docx_saida)
             pdf_path = docx_para_pdf(docx_saida, tmp)
+
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
-        # SALVA NO BANCO: valor NUMÉRICO (não o texto formatado!)
         salvar_proposta(cliente, cpf, modelo, franquia_int, valor_num, pdf_bytes)
 
         nome_arquivo = f"Proposta ({cliente}).pdf"
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=nome_arquivo
-        )
+        return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=nome_arquivo)
 
     except Exception as e:
-        # não “apaga” o formulário: volta com erro
         flash(str(e))
-        return render_template("proposta.html")
+        return render_template("proposta.html", prefill=prefill)
 
 
 @app.route("/recentes")
@@ -294,16 +317,16 @@ def recentes():
         return f"Erro em recentes: {e}", 500
 
 
-@app.route("/proposta/<int:pid>")
-def proposta_view(pid: int):
+@app.route("/proposta/<int:pid>/ver")
+def proposta_ver(pid: int):
     pdf = pegar_pdf_proposta(pid)
     if not pdf:
         abort(404)
     return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=False)
 
 
-@app.route("/proposta/<int:pid>/download")
-def proposta_download(pid: int):
+@app.route("/proposta/<int:pid>/baixar")
+def proposta_baixar(pid: int):
     pdf = pegar_pdf_proposta(pid)
     if not pdf:
         abort(404)
@@ -312,20 +335,16 @@ def proposta_download(pid: int):
 
 @app.route("/proposta/<int:pid>/excluir", methods=["POST"])
 def proposta_excluir(pid: int):
-    try:
-        excluir_proposta(pid)
-        return redirect(url_for("recentes"))
-    except Exception as e:
-        return f"Erro ao excluir: {e}", 500
+    excluir_proposta(pid)
+    return redirect(url_for("recentes"))
 
 
 @app.route("/contrato", methods=["GET", "POST"])
 def contrato():
     if request.method == "GET":
-        # garante prefill SEMPRE
         return render_template("contrato.html", prefill={})
 
-    prefill = dict(request.form)  # para não limpar se der erro
+    prefill = dict(request.form)
     try:
         denominacao = (request.form.get("denominacao") or "").strip()
         cpf = (request.form.get("cpf") or "").strip()
@@ -343,12 +362,14 @@ def contrato():
 
         franquia_ext = numero_por_extenso(franquia_int)
         valor_ext = dinheiro_por_extenso(valor_num)
-
         valor_fmt = f"R$ {brl_fmt(valor_num)} ({valor_ext})"
 
         data_assinatura_ext = data_extenso_por_digitos(datetime.now().strftime("%d%m%Y"))
 
         template_path = os.path.join(os.path.dirname(__file__), "contrato_template.docx")
+        if not os.path.exists(template_path):
+            raise RuntimeError("contrato_template.docx não encontrado no projeto.")
+
         doc = Document(template_path)
 
         mapping = {
@@ -364,9 +385,9 @@ def contrato():
             "{{ FRANQUIA }}": f"{franquia_int} ({franquia_ext})",
             "{{ VALOR }}": valor_fmt,
             "{{ DATA_ASSINATURA }}": data_assinatura_ext,
-            "{{ ASSINATURA }}": denominacao,  # repete nome na assinatura
+            "{{ ASSINATURA }}": denominacao,
         }
-        replace_in_doc(doc, mapping)
+        replace_text_everywhere(doc, mapping)
 
         with tempfile.TemporaryDirectory() as tmp:
             docx_saida = os.path.join(tmp, "contrato_gerado.docx")
@@ -376,12 +397,7 @@ def contrato():
                 pdf_bytes = f.read()
 
         nome_arquivo = f"Contrato ({denominacao}).pdf"
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=nome_arquivo
-        )
+        return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=nome_arquivo)
 
     except Exception as e:
         flash(str(e))
