@@ -26,7 +26,8 @@ def db_conn():
         raise RuntimeError("DATABASE_URL não encontrada.")
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url)
+    # TIMEOUT pra não travar o site
+    return psycopg2.connect(url, connect_timeout=3)
 
 def db_init():
     with db_conn() as conn, conn.cursor() as cur:
@@ -38,7 +39,6 @@ def db_init():
             pdf BYTEA NOT NULL
         );
         """)
-        # novos campos p/ gerar contrato a partir da proposta
         cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS cpf TEXT;")
         cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS modelo TEXT;")
         cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS franquia INTEGER;")
@@ -49,14 +49,6 @@ def limpar_propostas_expiradas():
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM propostas WHERE created_at < NOW() - INTERVAL '10 days';")
         conn.commit()
-
-@app.before_request
-def _housekeeping():
-    try:
-        db_init()
-        limpar_propostas_expiradas()
-    except Exception:
-        pass
 
 
 # ================= FUNÇÕES =================
@@ -134,10 +126,10 @@ def valor_formatado_e_extenso(valor: str):
 
 @app.route("/")
 def index():
+    # NÃO mexe com banco aqui (pra não travar o healthcheck do Railway)
     return render_template("index.html")
 
 
-# ---------- PROPOSTA (gera PDF e salva no banco por 10 dias) ----------
 @app.route("/proposta", methods=["GET", "POST"])
 def proposta():
     if request.method == "POST":
@@ -175,8 +167,9 @@ def proposta():
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
-            # salva no banco (PDF + dados base p/ contrato)
+            # salva no banco (se der erro, não derruba)
             try:
+                db_init()
                 franquia_int = int(so_digitos(franquia_raw)) if so_digitos(franquia_raw) else None
                 valor_num = float(valor_raw)
 
@@ -195,10 +188,14 @@ def proposta():
     return render_template("proposta.html")
 
 
-# ---------- RECENTES ----------
 @app.route("/recentes")
 def recentes():
-    limpar_propostas_expiradas()
+    try:
+        db_init()
+        limpar_propostas_expiradas()
+    except Exception:
+        return "Banco não conectou. Verifique DATABASE_URL.", 500
+
     propostas = []
     with db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute("SELECT id, cliente, created_at FROM propostas ORDER BY created_at DESC;")
@@ -212,7 +209,6 @@ def recentes():
     return render_template("recentes.html", propostas=propostas)
 
 
-# ---------- BAIXAR PDF SALVO ----------
 @app.route("/proposta_pdf/<int:pid>")
 def proposta_pdf(pid):
     with db_conn() as conn, conn.cursor() as cur:
@@ -229,7 +225,6 @@ def proposta_pdf(pid):
         return send_file(bio, as_attachment=True, download_name=f"Proposta - {nome}.pdf", mimetype="application/pdf")
 
 
-# ---------- ABRIR CONTRATO PRÉ-PREENCHIDO (a partir da proposta) ----------
 @app.route("/contrato_de_proposta/<int:pid>")
 def contrato_de_proposta(pid):
     with db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -249,7 +244,6 @@ def contrato_de_proposta(pid):
     return render_template("contrato.html", prefill=prefill)
 
 
-# ---------- CONTRATO ----------
 @app.route("/contrato", methods=["GET","POST"])
 def contrato():
     if request.method == "POST":
@@ -295,7 +289,6 @@ def contrato():
             nome = limpar_nome_arquivo(denominacao)
             return send_file(pdf_saida, as_attachment=True, download_name=f"Contrato - {nome}.pdf")
 
-    # GET normal
     return render_template("contrato.html", prefill={})
 
 
