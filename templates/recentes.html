@@ -1,14 +1,44 @@
-{% for p in propostas %}
-  <div style="margin-bottom:12px;">
-    <b>{{ p.cliente }}</b> — {{ p.criado_em }}
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Propostas Recentes</title>
+</head>
+<body>
+  <h1>Propostas Recentes</h1>
 
-    <a href="/proposta_view/{{ p.id }}" target="_blank">Visualizar</a> |
-    <a href="/proposta_download/{{ p.id }}">Baixar</a> |
+  <table border="1" cellpadding="6" cellspacing="0">
+    <tr>
+      <th>ID</th>
+      <th>Cliente</th>
+      <th>CPF</th>
+      <th>Modelo</th>
+      <th>Franquia</th>
+      <th>Valor</th>
+      <th>Criado em</th>
+      <th>Ações</th>
+    </tr>
+    {% for p in propostas %}
+    <tr>
+      <td>{{ p.id }}</td>
+      <td>{{ p.cliente }}</td>
+      <td>{{ p.cpf }}</td>
+      <td>{{ p.modelo }}</td>
+      <td>{{ p.franquia }}</td>
+      <td>{{ p.valor }}</td>
+      <td>{{ p.created_at }}</td>
+      <td>
+        <a href="/proposta/{{ p.id }}/ver" target="_blank">Visualizar</a> |
+        <a href="/proposta/{{ p.id }}/baixar">Baixar</a> |
+        <form method="POST" action="/proposta/{{ p.id }}/excluir" style="display:inline;" onsubmit="return confirm('Excluir esta proposta?');">
+          <button type="submit">Excluir</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
 
-    <form action="/proposta_delete/{{ p.id }}" method="post" style="display:inline;">
-      <button type="submit">Excluir</button>
-    </form>
-
-    | <a href="/contrato?proposta_id={{ p.id }}">Gerar Contrato</a>
-  </div>
-{% endfor %}
+  <br>
+  <a href="/">← Voltar</a>
+</body>
+</html>
