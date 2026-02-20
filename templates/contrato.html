@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="pt-br">
 <head>
   <meta charset="utf-8">
   <title>Novo Contrato</title>
@@ -9,48 +9,60 @@
 
   {% with messages = get_flashed_messages() %}
     {% if messages %}
-      <p style="color:red;">{{ messages[0] }}</p>
+      <p style="color:red">{{ messages[0] }}</p>
     {% endif %}
   {% endwith %}
 
   <form method="POST">
-    Denominação (nome):<br>
-    <input type="text" name="denominacao" value="{{ prefill.get('denominacao','') }}" required><br><br>
+    <label>Denominação:</label><br>
+    <input type="text" name="denominacao" value="{{ (prefill.denominacao if prefill else '') }}" required><br><br>
 
-    CPF/CNPJ:<br>
-    <input type="text" name="cpf" value="{{ prefill.get('cpf','') }}" required><br><br>
+    <label>CPF/CNPJ:</label><br>
+    <input type="text" name="cpf_cnpj" value="{{ (prefill.cpf_cnpj if prefill else '') }}"><br><br>
 
-    Endereço:<br>
-    <input type="text" name="endereco" value="{{ prefill.get('endereco','') }}" required><br><br>
+    <label>Endereço:</label><br>
+    <input type="text" name="endereco"><br><br>
 
-    Telefone:<br>
-    <input type="text" name="telefone" value="{{ prefill.get('telefone','') }}" required><br><br>
+    <label>Telefone:</label><br>
+    <input type="text" name="telefone"><br><br>
 
-    Email:<br>
-    <input type="text" name="email" value="{{ prefill.get('email','') }}" required><br><br>
+    <label>Email:</label><br>
+    <input type="text" name="email"><br><br>
 
-    Equipamento:<br>
-    <input type="text" name="equipamento" value="{{ prefill.get('equipamento','') }}" required><br><br>
+    <label>Equipamento:</label><br>
+    <input type="text" name="equipamento" value="{{ (prefill.equipamento if prefill else '') }}"><br><br>
 
-    Acessórios:<br>
-    <input type="text" name="acessorios" value="{{ prefill.get('acessorios','') }}" required><br><br>
+    <label>Acessórios:</label><br>
+    <input type="text" name="acessorios"><br><br>
 
-    Data início (DDMMAAAA, ex: 20022026):<br>
-    <input type="text" name="data_inicio" value="{{ prefill.get('data_inicio','') }}" required><br><br>
+    <label>Data início (DDMMAAAA):</label><br>
+    <input type="text" name="data_inicio" id="data_inicio" placeholder="20022026" maxlength="10" required><br><br>
 
-    Data término (DDMMAAAA, ex: 20022026):<br>
-    <input type="text" name="data_termino" value="{{ prefill.get('data_termino','') }}" required><br><br>
+    <label>Data término (DDMMAAAA):</label><br>
+    <input type="text" name="data_termino" id="data_termino" placeholder="20022027" maxlength="10" required><br><br>
 
-    Franquia (número):<br>
-    <input type="text" name="franquia" value="{{ prefill.get('franquia','') }}" required><br><br>
+    <label>Franquia (número):</label><br>
+    <input type="text" name="franquia" value="{{ (prefill.franquia if prefill else '') }}"><br><br>
 
-    Valor mensal (ex: 150 ou 150,00):<br>
-    <input type="text" name="valor" value="{{ prefill.get('valor','') }}" required><br><br>
+    <label>Valor mensal (ex: 200):</label><br>
+    <input type="text" name="valor_mensal" value="{{ (prefill.valor_mensal if prefill else '') }}"><br><br>
 
     <button type="submit">Gerar Contrato (PDF)</button>
   </form>
 
-  <br>
-  <a href="/">← Voltar</a>
+  <p><a href="/">← Voltar</a></p>
+
+<script>
+function maskDate(el){
+  el.addEventListener('input', function(){
+    let v = el.value.replace(/\D/g,'').slice(0,8);
+    if(v.length >= 5) el.value = v.slice(0,2)+"/"+v.slice(2,4)+"/"+v.slice(4);
+    else if(v.length >= 3) el.value = v.slice(0,2)+"/"+v.slice(2);
+    else el.value = v;
+  });
+}
+maskDate(document.getElementById('data_inicio'));
+maskDate(document.getElementById('data_termino'));
+</script>
 </body>
 </html>
