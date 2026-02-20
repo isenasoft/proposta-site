@@ -1,68 +1,99 @@
 <!doctype html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Novo Contrato</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:24px auto;padding:0 16px}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    a{color:#6c5ce7;text-decoration:none}
+    label{display:block;margin-top:12px;font-weight:600}
+    input{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;margin-top:6px}
+    button{margin-top:16px;padding:12px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;font-weight:700;cursor:pointer}
+    .error{background:#ffeaea;border:1px solid #ffb3b3;padding:10px;border-radius:8px;margin-top:12px}
+    .hint{font-size:13px;color:#555;margin-top:6px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    @media (max-width:700px){.grid{grid-template-columns:1fr}}
+  </style>
 </head>
 <body>
-  <h1>Novo Contrato</h1>
+  <div class="top">
+    <h2>Novo Contrato</h2>
+    <a href="/">← Voltar</a>
+  </div>
 
-  {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <p style="color:red">{{ messages[0] }}</p>
-    {% endif %}
-  {% endwith %}
+  {% if error %}
+  <div class="error"><b>Erro:</b> {{ error }}</div>
+  {% endif %}
 
-  <form method="POST">
-    <label>Denominação:</label><br>
-    <input type="text" name="denominacao" value="{{ (prefill.denominacao if prefill else '') }}" required><br><br>
+  <form method="post">
+    <label>Denominação / Nome</label>
+    <input name="denominacao" value="{{ prefill.get('denominacao','') }}" required />
 
-    <label>CPF/CNPJ:</label><br>
-    <input type="text" name="cpf_cnpj" value="{{ (prefill.cpf_cnpj if prefill else '') }}"><br><br>
+    <label>CPF/CNPJ</label>
+    <input name="cpf_cnpj" value="{{ prefill.get('cpf_cnpj','') }}" required />
 
-    <label>Endereço:</label><br>
-    <input type="text" name="endereco"><br><br>
+    <label>Endereço</label>
+    <input name="endereco" value="{{ prefill.get('endereco','') }}" required />
 
-    <label>Telefone:</label><br>
-    <input type="text" name="telefone"><br><br>
+    <div class="grid">
+      <div>
+        <label>Telefone</label>
+        <input name="telefone" value="{{ prefill.get('telefone','') }}" required />
+      </div>
+      <div>
+        <label>Email</label>
+        <input name="email" value="{{ prefill.get('email','') }}" required />
+      </div>
+    </div>
 
-    <label>Email:</label><br>
-    <input type="text" name="email"><br><br>
+    <label>Equipamento</label>
+    <input name="equipamento" value="{{ prefill.get('equipamento','') }}" required />
 
-    <label>Equipamento:</label><br>
-    <input type="text" name="equipamento" value="{{ (prefill.equipamento if prefill else '') }}"><br><br>
+    <label>Acessórios</label>
+    <input name="acessorios" value="{{ prefill.get('acessorios','') }}" required />
 
-    <label>Acessórios:</label><br>
-    <input type="text" name="acessorios"><br><br>
+    <div class="grid">
+      <div>
+        <label>Data início (DDMMAAAA)</label>
+        <input class="date-mask" name="data_inicio" value="{{ prefill.get('data_inicio','') }}" inputmode="numeric" placeholder="20022026" required />
+        <div class="hint">Digite só números (ex: 20022026). O sistema coloca as barras.</div>
+      </div>
+      <div>
+        <label>Data término (DDMMAAAA)</label>
+        <input class="date-mask" name="data_termino" value="{{ prefill.get('data_termino','') }}" inputmode="numeric" placeholder="20022027" required />
+      </div>
+    </div>
 
-    <label>Data início (DDMMAAAA):</label><br>
-    <input type="text" name="data_inicio" id="data_inicio" placeholder="20022026" maxlength="10" required><br><br>
-
-    <label>Data término (DDMMAAAA):</label><br>
-    <input type="text" name="data_termino" id="data_termino" placeholder="20022027" maxlength="10" required><br><br>
-
-    <label>Franquia (número):</label><br>
-    <input type="text" name="franquia" value="{{ (prefill.franquia if prefill else '') }}"><br><br>
-
-    <label>Valor mensal (ex: 200):</label><br>
-    <input type="text" name="valor_mensal" value="{{ (prefill.valor_mensal if prefill else '') }}"><br><br>
+    <div class="grid">
+      <div>
+        <label>Franquia (ex: 700)</label>
+        <input name="franquia" value="{{ prefill.get('franquia','') }}" inputmode="numeric" required />
+      </div>
+      <div>
+        <label>Valor mensal (ex: 200 ou 200,00)</label>
+        <input name="valor_mensal" value="{{ prefill.get('valor_mensal','') }}" inputmode="decimal" required />
+      </div>
+    </div>
 
     <button type="submit">Gerar Contrato (PDF)</button>
   </form>
 
-  <p><a href="/">← Voltar</a></p>
-
-<script>
-function maskDate(el){
-  el.addEventListener('input', function(){
-    let v = el.value.replace(/\D/g,'').slice(0,8);
-    if(v.length >= 5) el.value = v.slice(0,2)+"/"+v.slice(2,4)+"/"+v.slice(4);
-    else if(v.length >= 3) el.value = v.slice(0,2)+"/"+v.slice(2);
-    else el.value = v;
-  });
-}
-maskDate(document.getElementById('data_inicio'));
-maskDate(document.getElementById('data_termino'));
-</script>
+  <script>
+    function applyDateMask(input) {
+      input.addEventListener('input', function() {
+        let v = input.value.replace(/\D/g,'').slice(0,8);
+        if (v.length >= 5) {
+          input.value = v.slice(0,2) + '/' + v.slice(2,4) + '/' + v.slice(4);
+        } else if (v.length >= 3) {
+          input.value = v.slice(0,2) + '/' + v.slice(2);
+        } else {
+          input.value = v;
+        }
+      });
+    }
+    document.querySelectorAll('.date-mask').forEach(applyDateMask);
+  </script>
 </body>
 </html>
