@@ -1,40 +1,51 @@
 <!doctype html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Nova Proposta</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:24px auto;padding:0 16px}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    a{color:#6c5ce7;text-decoration:none}
+    label{display:block;margin-top:12px;font-weight:600}
+    input{width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;margin-top:6px}
+    button{margin-top:16px;padding:12px 16px;border:0;border-radius:8px;background:#6c5ce7;color:#fff;font-weight:700;cursor:pointer}
+    .error{background:#ffeaea;border:1px solid #ffb3b3;padding:10px;border-radius:8px;margin-top:12px}
+    .hint{font-size:13px;color:#555;margin-top:6px}
+  </style>
 </head>
 <body>
-  <h1>Nova Proposta</h1>
+  <div class="top">
+    <h2>Nova Proposta</h2>
+    <a href="/">← Voltar</a>
+  </div>
 
-  {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <p style="color:red">{{ messages[0] }}</p>
-    {% endif %}
-  {% endwith %}
+  {% if error %}
+  <div class="error"><b>Erro:</b> {{ error }}</div>
+  {% endif %}
 
-  <form method="POST" enctype="multipart/form-data">
-    <label>Cliente:</label><br>
-    <input type="text" name="cliente" required><br><br>
+  <form method="post" enctype="multipart/form-data">
+    <label>Cliente</label>
+    <input name="cliente" required />
 
-    <label>CPF/CNPJ:</label><br>
-    <input type="text" name="cpf"><br><br>
+    <label>CPF/CNPJ</label>
+    <input name="cpf" required />
 
-    <label>Modelo Impressora:</label><br>
-    <input type="text" name="modelo"><br><br>
+    <label>Modelo da impressora</label>
+    <input name="modelo" required />
 
-    <label>Franquia (número):</label><br>
-    <input type="text" name="franquia" placeholder="700"><br><br>
+    <label>Franquia (ex: 1000)</label>
+    <input name="franquia" inputmode="numeric" required />
 
-    <label>Valor mensal (ex: 200):</label><br>
-    <input type="text" name="valor" placeholder="200"><br><br>
+    <label>Valor mensal (ex: 200 ou 200,00)</label>
+    <input name="valor" inputmode="decimal" required />
 
-    <label>Imagem (opcional):</label><br>
-    <input type="file" name="imagem" accept="image/*"><br><br>
+    <label>Imagem do equipamento</label>
+    <input type="file" name="imagem" accept="image/*" required />
+    <div class="hint">Anexe a imagem. O sistema encaixa no tamanho do modelo.</div>
 
     <button type="submit">Gerar Proposta (PDF)</button>
   </form>
-
-  <p><a href="/">← Voltar</a></p>
 </body>
 </html>
