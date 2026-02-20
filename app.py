@@ -1,393 +1,410 @@
 import os
 import re
 import io
+import base64
 import tempfile
 import subprocess
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from datetime import datetime, date
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from flask import Flask, render_template, request, send_file, redirect, url_for, abort, flash
 
+from flask import Flask, request, render_template, send_file, redirect, url_for, flash
 from docx import Document
 from docx.shared import Inches
-
-try:
-    from num2words import num2words
-except Exception:
-    num2words = None
-
+from num2words import num2words
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 
 
-# -----------------------------
+# ----------------------------
 # DB
-# -----------------------------
+# ----------------------------
 def db_conn():
-    dburl = os.environ.get("DATABASE_URL")
-    if not dburl:
-        raise RuntimeError("DATABASE_URL não encontrada (adicione o PostgreSQL no Railway).")
-    return psycopg2.connect(dburl)
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL não encontrada (conecte o Postgres e crie a variável DATABASE_URL no Railway).")
+    return psycopg2.connect(db_url, sslmode="require")
 
 
-def init_db():
+def garantir_tabela():
+    """Cria a tabela se não existir (não altera colunas existentes)."""
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute("""
         CREATE TABLE IF NOT EXISTS propostas (
             id SERIAL PRIMARY KEY,
             cliente TEXT NOT NULL,
-            cpf TEXT NOT NULL,
-            modelo TEXT NOT NULL,
-            franquia INTEGER NOT NULL,
-            valor NUMERIC(12,2) NOT NULL,
+            cpf TEXT,
+            modelo TEXT,
+            franquia INTEGER,
+            valor NUMERIC(12,2),
             pdf BYTEA NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
         );
         """)
         conn.commit()
 
 
 def salvar_proposta(cliente, cpf, modelo, franquia_int, valor_num, pdf_bytes):
+    """SALVA NO BANCO VALOR COMO NUMÉRICO (ex: 150.00), não texto."""
     with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO propostas (cliente, cpf, modelo, franquia, valor, pdf)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (cliente, cpf, modelo, franquia_int, valor_num, psycopg2.Binary(pdf_bytes)))
+        cur.execute(
+            """
+            INSERT INTO propostas (cliente, cpf, modelo, franquia, valor, pdf, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            RETURNING id;
+            """,
+            (cliente, cpf, modelo, franquia_int, valor_num, psycopg2.Binary(pdf_bytes)),
+        )
+        pid = cur.fetchone()[0]
         conn.commit()
+        return pid
 
 
-def listar_propostas(limit=100):
+def listar_propostas():
     with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT id, cliente, cpf, modelo, franquia, valor, created_at
             FROM propostas
             ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,))
+            LIMIT 50;
+        """)
         return cur.fetchall()
-
-
-def limpar_propostas_expiradas(dias=10):
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM propostas WHERE created_at < NOW() - INTERVAL %s", (f"{dias} days",))
-        conn.commit()
 
 
 def pegar_pdf_proposta(pid: int) -> bytes | None:
     with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT pdf FROM propostas WHERE id=%s", (pid,))
+        cur.execute("SELECT pdf FROM propostas WHERE id=%s;", (pid,))
         row = cur.fetchone()
-        if not row:
-            return None
-        return bytes(row[0])
+        return row[0] if row else None
 
 
-def excluir_proposta(pid: int):
+def pegar_proposta(pid: int):
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            SELECT id, cliente, cpf, modelo, franquia, valor, created_at
+            FROM propostas
+            WHERE id=%s;
+        """, (pid,))
+        return cur.fetchone()
+
+
+def limpar_propostas_expiradas(dias=10):
+    """Remove propostas antigas usando created_at (não existe criado_em no seu banco)."""
     with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM propostas WHERE id=%s", (pid,))
+        cur.execute("DELETE FROM propostas WHERE created_at < NOW() - INTERVAL %s;", (f"{dias} days",))
         conn.commit()
 
 
-# -----------------------------
-# DOCX helpers (substituição confiável)
-# -----------------------------
-def replace_text_everywhere(doc: Document, mapping: dict[str, str]):
-    # método “confiável”: substitui no texto do parágrafo e recria em 1 run
-    # (mantém estilo do parágrafo, evita placeholders quebrados em vários runs)
-    def _replace_paragraph(p):
-        txt = p.text
-        changed = False
-        for k, v in mapping.items():
-            if k in txt:
-                txt = txt.replace(k, v)
-                changed = True
-        if changed:
-            for r in p.runs:
-                r.text = ""
-            if p.runs:
-                p.runs[0].text = txt
-            else:
-                p.add_run(txt)
+# ----------------------------
+# Utils de formatação
+# ----------------------------
+MESES = {
+    1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril",
+    5: "maio", 6: "junho", 7: "julho", 8: "agosto",
+    9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro"
+}
 
-    for p in doc.paragraphs:
-        _replace_paragraph(p)
+def formatar_data_extenso(d: date) -> str:
+    return f"{d.day:02d} de {MESES[d.month]} de {d.year}"
 
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    _replace_paragraph(p)
+def normalizar_data_digitos(s: str) -> str:
+    """Aceita '20022026' ou '20/02/2026' e devolve '20022026'."""
+    digits = re.sub(r"\D", "", (s or "").strip())
+    return digits
 
+def data_extenso_por_digitos(s: str) -> str:
+    digits = normalizar_data_digitos(s)
+    if len(digits) != 8:
+        raise ValueError("Data inválida (use DDMMAAAA)")
+    dd = int(digits[0:2])
+    mm = int(digits[2:4])
+    yyyy = int(digits[4:8])
+    d = date(yyyy, mm, dd)  # pode lançar ValueError se data impossível
+    return formatar_data_extenso(d)
 
-def insert_image_at_placeholder(doc: Document, placeholder: str, image_path: str, width_inches: float = 2.2) -> bool:
-    if not image_path or not os.path.exists(image_path):
-        return False
+def int_por_texto(n: int) -> str:
+    # num2words em pt_BR
+    return num2words(n, lang="pt_BR")
 
-    def _handle_paragraph(p):
-        if placeholder in p.text:
-            # limpa o texto e coloca a imagem no mesmo parágrafo
-            for r in p.runs:
-                r.text = ""
-            run = p.runs[0] if p.runs else p.add_run("")
-            run.add_picture(image_path, width=Inches(width_inches))
-            return True
-        return False
+def valor_por_extenso_reais(valor: float) -> str:
+    # Ex: 150.00 -> "cento e cinquenta reais"
+    inteiro = int(round(valor))
+    txt = num2words(inteiro, lang="pt_BR")
+    return f"{txt} reais"
 
-    for p in doc.paragraphs:
-        if _handle_paragraph(p):
-            return True
+def formatar_moeda_brl(valor: float) -> str:
+    # 150 -> "R$ 150,00"
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    if _handle_paragraph(p):
-                        return True
-
-    return False
+def slug_nome_arquivo(nome: str) -> str:
+    nome = (nome or "").strip()
+    nome = re.sub(r"[^\w\s\-]", "", nome, flags=re.UNICODE)
+    nome = re.sub(r"\s+", " ", nome).strip()
+    return nome[:80] if nome else "Cliente"
 
 
-# -----------------------------
-# PDF conversion
-# -----------------------------
+# ----------------------------
+# DOCX -> PDF (LibreOffice)
+# ----------------------------
 def docx_para_pdf(docx_path: str, out_dir: str) -> str:
     subprocess.run(
-        ["soffice", "--headless", "--nologo", "--nolockcheck", "--convert-to", "pdf",
-         "--outdir", out_dir, docx_path],
+        ["soffice", "--headless", "--nologo", "--nolockcheck",
+         "--convert-to", "pdf", "--outdir", out_dir, docx_path],
         check=True
     )
     base = os.path.splitext(os.path.basename(docx_path))[0]
-    return os.path.join(out_dir, base + ".pdf")
+    pdf_path = os.path.join(out_dir, f"{base}.pdf")
+    if not os.path.exists(pdf_path):
+        raise RuntimeError("Falha ao converter para PDF.")
+    return pdf_path
 
 
-# -----------------------------
-# Format / parsing
-# -----------------------------
-MESES = {
-    1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio", 6: "junho",
-    7: "julho", 8: "agosto", 9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro"
-}
+# ----------------------------
+# Preencher placeholders no docx
+# ----------------------------
+def substituir_texto_doc(doc: Document, mapa: dict[str, str]):
+    """Substitui texto preservando estilos (reconstrói runs)."""
+    for p in doc.paragraphs:
+        full = "".join(r.text for r in p.runs)
+        if not full:
+            continue
+        novo = full
+        mudou = False
+        for k, v in mapa.items():
+            if k in novo:
+                novo = novo.replace(k, v)
+                mudou = True
+        if mudou:
+            # limpa runs e coloca tudo no 1º run (mantém estilo do primeiro)
+            if p.runs:
+                p.runs[0].text = novo
+                for r in p.runs[1:]:
+                    r.text = ""
+            else:
+                p.add_run(novo)
+
+    # também em tabelas
+    for t in doc.tables:
+        for row in t.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    full = "".join(r.text for r in p.runs)
+                    if not full:
+                        continue
+                    novo = full
+                    mudou = False
+                    for k, v in mapa.items():
+                        if k in novo:
+                            novo = novo.replace(k, v)
+                            mudou = True
+                    if mudou:
+                        if p.runs:
+                            p.runs[0].text = novo
+                            for r in p.runs[1:]:
+                                r.text = ""
+                        else:
+                            p.add_run(novo)
+
+def inserir_imagem_doc(doc: Document, placeholder: str, img_bytes: bytes | None, largura_polegadas=4.8):
+    if not img_bytes:
+        # se não veio imagem, só remove placeholder
+        substituir_texto_doc(doc, {placeholder: ""})
+        return
+
+    # acha o parágrafo com o placeholder
+    for p in doc.paragraphs:
+        if placeholder in p.text:
+            # limpa texto
+            for r in p.runs:
+                r.text = r.text.replace(placeholder, "")
+            # insere imagem no mesmo parágrafo
+            run = p.add_run()
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            try:
+                tmp.write(img_bytes)
+                tmp.close()
+                run.add_picture(tmp.name, width=Inches(largura_polegadas))
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except:
+                    pass
+            break
 
 
-def data_extenso_por_digitos(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"[^\d]", "", s)
-    if len(s) == 8:
-        dd = int(s[0:2]); mm = int(s[2:4]); yyyy = int(s[4:8])
-    elif len(s) == 6:
-        dd = int(s[0:2]); mm = int(s[2:4]); yy = int(s[4:6])
-        yyyy = 2000 + yy
-    else:
-        raise ValueError("Data inválida (use DDMMAAAA, ex: 20022026).")
-
-    datetime(yyyy, mm, dd)
-    return f"{dd} de {MESES[mm]} de {yyyy}"
-
-
-def parse_int(s: str) -> int:
-    s = (s or "").strip()
-    s = re.sub(r"[^\d]", "", s)
-    if not s:
-        raise ValueError("Número inválido.")
-    return int(s)
-
-
-def parse_money_to_decimal(s: str) -> Decimal:
-    s = (s or "").strip()
-    s = s.replace("R$", "").strip()
-    s = s.replace(".", "").replace(",", ".")
-    try:
-        val = Decimal(s)
-    except InvalidOperation:
-        raise ValueError("Valor inválido (ex: 150 ou 150,00).")
-    return val.quantize(Decimal("0.01"))
-
-
-def brl_fmt(valor: Decimal) -> str:
-    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def numero_por_extenso(n: int) -> str:
-    if not num2words:
-        return str(n)
-    return num2words(n, lang="pt_BR")
-
-
-def dinheiro_por_extenso(valor: Decimal) -> str:
-    reais = int(valor)
-    if not num2words:
-        return "reais"
-    if reais == 1:
-        return "um real"
-    return f"{num2words(reais, lang='pt_BR')} reais"
-
-
-# -----------------------------
-# Routes
-# -----------------------------
-@app.before_request
-def _startup():
-    try:
-        init_db()
-    except Exception:
-        pass
-
-
+# ----------------------------
+# Rotas
+# ----------------------------
 @app.route("/")
 def index():
+    garantir_tabela()
     return render_template("index.html")
 
 
 @app.route("/proposta", methods=["GET", "POST"])
 def proposta():
+    garantir_tabela()
     if request.method == "GET":
         return render_template("proposta.html")
 
-    prefill = dict(request.form)
     try:
-        cliente = (request.form.get("cliente") or "").strip()
-        cpf = (request.form.get("cpf") or "").strip()
-        modelo = (request.form.get("modelo") or "").strip()
-        franquia_int = parse_int(request.form.get("franquia") or "")
-        valor_num = parse_money_to_decimal(request.form.get("valor") or "")
+        cliente = request.form.get("cliente", "").strip()
+        cpf = request.form.get("cpf", "").strip()
+        modelo = request.form.get("modelo", "").strip()
+        franquia_int = int(re.sub(r"\D", "", request.form.get("franquia", "0")) or "0")
+        valor_num = float((request.form.get("valor", "0") or "0").replace(",", "."))
+        validade = request.form.get("validade", "").strip()  # se você usa no template
+        contrato = request.form.get("contrato", "").strip()  # se você usa no template
 
-        if not cliente or not cpf or not modelo:
-            raise ValueError("Preencha cliente, CPF/CNPJ e modelo.")
+        if not cliente:
+            raise ValueError("Cliente é obrigatório.")
 
-        valor_ext = dinheiro_por_extenso(valor_num)
-        valor_fmt = f"R$ {brl_fmt(valor_num)} ({valor_ext})"
+        # imagem opcional
+        img_file = request.files.get("imagem")
+        img_bytes = img_file.read() if img_file and img_file.filename else None
 
-        template_path = os.path.join(os.path.dirname(__file__), "template.docx")
+        # Formatações pro DOCX
+        hoje = date.today()
+        data_topo = hoje.strftime("%d/%m/%Y")  # topo automático (igual você pediu)
+        valor_fmt = f"{formatar_moeda_brl(valor_num)} ({valor_por_extenso_reais(valor_num)})"
+        franquia_fmt = f"{franquia_int} ({int_por_texto(franquia_int)})"
+
+        # Carrega template de proposta
+        template_path = os.path.join(os.getcwd(), "template.docx")
         if not os.path.exists(template_path):
-            raise RuntimeError("template.docx não encontrado no projeto.")
+            raise RuntimeError("template.docx não encontrado na raiz do projeto.")
 
         doc = Document(template_path)
-
-        mapping = {
+        mapa = {
             "{{ CLIENTE }}": cliente,
             "{{ CPF }}": cpf,
             "{{ MODELO }}": modelo,
-            "{{ FRANQUIA }}": str(franquia_int),
+            "{{ FRANQUIA }}": franquia_fmt,
             "{{ VALOR }}": valor_fmt,
-            "{{ DATA }}": datetime.now().strftime("%d/%m/%Y"),
+            "{{ DATA }}": data_topo,
+            "{{ VALIDADE }}": validade,
+            "{{ CONTRATO }}": contrato,
         }
-        replace_text_everywhere(doc, mapping)
+        substituir_texto_doc(doc, mapa)
+        inserir_imagem_doc(doc, "{{ IMAGEM }}", img_bytes, largura_polegadas=5.6)  # maior (ajustável)
 
-        # IMAGEM: upload do formulário (opcional)
-        image_file = request.files.get("imagem")
-        image_path = None
         with tempfile.TemporaryDirectory() as tmp:
-            if image_file and image_file.filename:
-                image_path = os.path.join(tmp, "img_upload")
-                image_file.save(image_path)
-                insert_image_at_placeholder(doc, "{{ IMAGEM }}", image_path, width_inches=2.2)
-            else:
-                # fallback: se existir static/logo.png
-                static_logo = os.path.join(os.path.dirname(__file__), "static", "logo.png")
-                if os.path.exists(static_logo):
-                    insert_image_at_placeholder(doc, "{{ IMAGEM }}", static_logo, width_inches=2.2)
-
             docx_saida = os.path.join(tmp, "proposta_gerada.docx")
             doc.save(docx_saida)
             pdf_path = docx_para_pdf(docx_saida, tmp)
-
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
-        salvar_proposta(cliente, cpf, modelo, franquia_int, valor_num, pdf_bytes)
+        # SALVA NO BANCO (valor_num é número)
+        pid = salvar_proposta(cliente, cpf, modelo, franquia_int, valor_num, pdf_bytes)
 
-        nome_arquivo = f"Proposta ({cliente}).pdf"
-        return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=nome_arquivo)
+        filename = f"Proposta {slug_nome_arquivo(cliente)}.pdf"
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
+        )
 
     except Exception as e:
         flash(str(e))
-        return render_template("proposta.html", prefill=prefill)
+        return redirect(url_for("proposta"))
 
 
 @app.route("/recentes")
 def recentes():
+    garantir_tabela()
     try:
-        limpar_propostas_expiradas()
-        props = listar_propostas()
-        return render_template("recentes.html", propostas=props)
-    except Exception as e:
-        return f"Erro em recentes: {e}", 500
+        limpar_propostas_expiradas(10)
+    except Exception:
+        # se der qualquer erro de limpeza, não derruba a página
+        pass
+
+    propostas = listar_propostas()
+    return render_template("recentes.html", propostas=propostas)
 
 
-@app.route("/proposta/<int:pid>/ver")
-def proposta_ver(pid: int):
+@app.route("/proposta/<int:pid>/pdf")
+def proposta_pdf(pid):
+    garantir_tabela()
     pdf = pegar_pdf_proposta(pid)
     if not pdf:
-        abort(404)
-    return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=False)
-
-
-@app.route("/proposta/<int:pid>/baixar")
-def proposta_baixar(pid: int):
-    pdf = pegar_pdf_proposta(pid)
-    if not pdf:
-        abort(404)
-    return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"Proposta ({pid}).pdf")
-
-
-@app.route("/proposta/<int:pid>/excluir", methods=["POST"])
-def proposta_excluir(pid: int):
-    excluir_proposta(pid)
-    return redirect(url_for("recentes"))
+        return "Não encontrada.", 404
+    prop = pegar_proposta(pid)
+    cliente = prop["cliente"] if prop else "Cliente"
+    filename = f"Proposta {slug_nome_arquivo(cliente)}.pdf"
+    return send_file(
+        io.BytesIO(pdf),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename
+    )
 
 
 @app.route("/contrato", methods=["GET", "POST"])
 def contrato():
+    garantir_tabela()
+
+    # prefill vindo de uma proposta recente
+    prefill = {}
+    prefill_id = request.args.get("prefill_id")
+    if prefill_id:
+        p = pegar_proposta(int(prefill_id))
+        if p:
+            prefill = {
+                "denominacao": p.get("cliente") or "",
+                "cpf_cnpj": p.get("cpf") or "",
+                "equipamento": p.get("modelo") or "",
+                "franquia": str(p.get("franquia") or ""),
+                "valor_mensal": str(p.get("valor") or ""),
+            }
+
     if request.method == "GET":
-        return render_template("contrato.html", prefill={})
+        return render_template("contrato.html", prefill=prefill)
 
-    prefill = dict(request.form)
     try:
-        denominacao = (request.form.get("denominacao") or "").strip()
-        cpf = (request.form.get("cpf") or "").strip()
-        endereco = (request.form.get("endereco") or "").strip()
-        telefone = (request.form.get("telefone") or "").strip()
-        email = (request.form.get("email") or "").strip()
-        equipamento = (request.form.get("equipamento") or "").strip()
-        acessorios = (request.form.get("acessorios") or "").strip()
+        denominacao = request.form.get("denominacao", "").strip()
+        cpf_cnpj = request.form.get("cpf_cnpj", "").strip()
+        endereco = request.form.get("endereco", "").strip()
+        telefone = request.form.get("telefone", "").strip()
+        email = request.form.get("email", "").strip()
+        equipamento = request.form.get("equipamento", "").strip()
+        acessorios = request.form.get("acessorios", "").strip()
 
-        data_inicio_ext = data_extenso_por_digitos(request.form.get("data_inicio") or "")
-        data_termino_ext = data_extenso_por_digitos(request.form.get("data_termino") or "")
+        data_inicio = data_extenso_por_digitos(request.form.get("data_inicio", ""))
+        data_termino = data_extenso_por_digitos(request.form.get("data_termino", ""))
 
-        franquia_int = parse_int(request.form.get("franquia") or "")
-        valor_num = parse_money_to_decimal(request.form.get("valor") or "")
+        franquia_int = int(re.sub(r"\D", "", request.form.get("franquia", "0")) or "0")
+        valor_num = float((request.form.get("valor_mensal", "0") or "0").replace(",", "."))
 
-        franquia_ext = numero_por_extenso(franquia_int)
-        valor_ext = dinheiro_por_extenso(valor_num)
-        valor_fmt = f"R$ {brl_fmt(valor_num)} ({valor_ext})"
+        hoje_extenso = formatar_data_extenso(date.today())
+        franquia_fmt = f"{franquia_int} ({int_por_texto(franquia_int)})"
+        valor_fmt = f"{formatar_moeda_brl(valor_num)} ({valor_por_extenso_reais(valor_num)})"
 
-        data_assinatura_ext = data_extenso_por_digitos(datetime.now().strftime("%d%m%Y"))
-
-        template_path = os.path.join(os.path.dirname(__file__), "contrato_template.docx")
+        template_path = os.path.join(os.getcwd(), "contrato_template.docx")
         if not os.path.exists(template_path):
-            raise RuntimeError("contrato_template.docx não encontrado no projeto.")
+            raise RuntimeError("contrato_template.docx não encontrado na raiz do projeto.")
 
         doc = Document(template_path)
 
-        mapping = {
+        mapa = {
             "{{ DENOMINACAO }}": denominacao,
-            "{{ CPF }}": cpf,
+            "{{ CPF_CNPJ }}": cpf_cnpj,
             "{{ ENDERECO }}": endereco,
             "{{ TELEFONE }}": telefone,
             "{{ EMAIL }}": email,
             "{{ EQUIPAMENTO }}": equipamento,
             "{{ ACESSORIOS }}": acessorios,
-            "{{ DATA_INICIO }}": data_inicio_ext,
-            "{{ DATA_TERMINO }}": data_termino_ext,
-            "{{ FRANQUIA }}": f"{franquia_int} ({franquia_ext})",
-            "{{ VALOR }}": valor_fmt,
-            "{{ DATA_ASSINATURA }}": data_assinatura_ext,
-            "{{ ASSINATURA }}": denominacao,
+            "{{ DATA_INICIO }}": data_inicio,
+            "{{ DATA_TERMINO }}": data_termino,
+            "{{ FRANQUIA }}": franquia_fmt,
+            "{{ VALOR_MENSAL }}": valor_fmt,
+            "{{ DATA_ASSINATURA }}": hoje_extenso,
+            "{{ ASSINATURA }}": denominacao,  # repete o nome na assinatura
         }
-        replace_text_everywhere(doc, mapping)
+        substituir_texto_doc(doc, mapa)
 
         with tempfile.TemporaryDirectory() as tmp:
             docx_saida = os.path.join(tmp, "contrato_gerado.docx")
@@ -396,13 +413,19 @@ def contrato():
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
 
-        nome_arquivo = f"Contrato ({denominacao}).pdf"
-        return send_file(io.BytesIO(pdf_bytes), mimetype="application/pdf", as_attachment=True, download_name=nome_arquivo)
+        filename = f"Contrato {slug_nome_arquivo(denominacao)}.pdf"
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=filename
+        )
 
     except Exception as e:
         flash(str(e))
-        return render_template("contrato.html", prefill=prefill)
+        # volta mantendo prefill
+        return redirect(url_for("contrato", prefill_id=prefill_id) if prefill_id else url_for("contrato"))
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
