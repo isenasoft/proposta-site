@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="pt-br">
 <head>
   <meta charset="utf-8">
   <title>Nova Proposta</title>
@@ -9,33 +9,32 @@
 
   {% with messages = get_flashed_messages() %}
     {% if messages %}
-      <p style="color:red;">{{ messages[0] }}</p>
+      <p style="color:red">{{ messages[0] }}</p>
     {% endif %}
   {% endwith %}
 
   <form method="POST" enctype="multipart/form-data">
-    Cliente:<br>
-    <input type="text" name="cliente" value="{{ (prefill.cliente if prefill else '') }}" required><br><br>
+    <label>Cliente:</label><br>
+    <input type="text" name="cliente" required><br><br>
 
-    CPF/CNPJ:<br>
-    <input type="text" name="cpf" value="{{ (prefill.cpf if prefill else '') }}" required><br><br>
+    <label>CPF/CNPJ:</label><br>
+    <input type="text" name="cpf"><br><br>
 
-    Modelo Impressora:<br>
-    <input type="text" name="modelo" value="{{ (prefill.modelo if prefill else '') }}" required><br><br>
+    <label>Modelo Impressora:</label><br>
+    <input type="text" name="modelo"><br><br>
 
-    Franquia (número):<br>
-    <input type="text" name="franquia" value="{{ (prefill.franquia if prefill else '') }}" required><br><br>
+    <label>Franquia (número):</label><br>
+    <input type="text" name="franquia" placeholder="700"><br><br>
 
-    Valor mensal (ex: 150 ou 150,00):<br>
-    <input type="text" name="valor" value="{{ (prefill.valor if prefill else '') }}" required><br><br>
+    <label>Valor mensal (ex: 200):</label><br>
+    <input type="text" name="valor" placeholder="200"><br><br>
 
-    Imagem (opcional):<br>
+    <label>Imagem (opcional):</label><br>
     <input type="file" name="imagem" accept="image/*"><br><br>
 
     <button type="submit">Gerar Proposta (PDF)</button>
   </form>
 
-  <br>
-  <a href="/">← Voltar</a>
+  <p><a href="/">← Voltar</a></p>
 </body>
 </html>
