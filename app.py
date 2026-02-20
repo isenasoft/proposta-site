@@ -1,592 +1,674 @@
+import io
 import os
 import re
-import io
-import uuid
 import tempfile
 import subprocess
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 import psycopg2
-from flask import Flask, request, render_template, send_file, redirect, url_for, flash
+from psycopg2.extras import RealDictCursor
+from flask import Flask, render_template, request, redirect, url_for, send_file
+from werkzeug.utils import secure_filename
 
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Mm
+from PIL import Image
 
-# ----------------------------
+# -----------------------------
 # Config
-# ----------------------------
-TZ_BR = ZoneInfo("America/Sao_Paulo")
-UPLOAD_MAX_MB = 8
+# -----------------------------
+APP_TZ = ZoneInfo(os.environ.get("APP_TZ", "America/Sao_Paulo"))
+RETENCAO_DIAS = int(os.environ.get("RETENCAO_DIAS", "10"))
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROPOSTA_TEMPLATE = os.path.join(BASE_DIR, "template.docx")
+CONTRATO_TEMPLATE = os.path.join(BASE_DIR, "contrato_template.docx")
+
+# -----------------------------
+# Flask
+# -----------------------------
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
 
-app.config["MAX_CONTENT_LENGTH"] = UPLOAD_MAX_MB * 1024 * 1024
 
-# ----------------------------
-# Utils: DB
-# ----------------------------
-def db_conn():
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("DATABASE_URL não encontrada (adicione o PostgreSQL no Railway).")
-    return psycopg2.connect(dsn)
-
-def ensure_schema():
-    """
-    Garante tabela 'propostas' com colunas esperadas:
-    id (uuid), cliente, cpf, modelo, franquia (int), valor (numeric), pdf (bytea), created_at (timestamp)
-    """
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS propostas (
-                id UUID PRIMARY KEY,
-                cliente TEXT NOT NULL,
-                cpf TEXT NOT NULL,
-                modelo TEXT NOT NULL,
-                franquia INTEGER NOT NULL,
-                valor NUMERIC(12,2) NOT NULL,
-                pdf BYTEA NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT NOW()
-            );
-        """)
-
-        # Caso sua tabela seja antiga e falte alguma coluna, tenta adicionar sem quebrar
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='propostas' AND column_name='created_at'
-                ) THEN
-                    ALTER TABLE propostas ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT NOW();
-                END IF;
-
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='propostas' AND column_name='pdf'
-                ) THEN
-                    ALTER TABLE propostas ADD COLUMN pdf BYTEA;
-                END IF;
-            END $$;
-        """)
-
-def salvar_proposta(cliente, cpf, modelo, franquia_int, valor_decimal, pdf_bytes):
-    ensure_schema()
-    pid = uuid.uuid4()
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO propostas (id, cliente, cpf, modelo, franquia, valor, pdf, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW());
-        """, (str(pid), cliente, cpf, modelo, int(franquia_int), valor_decimal, psycopg2.Binary(pdf_bytes)))
-    return str(pid)
-
-def listar_propostas():
-    ensure_schema()
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            SELECT id, cliente, cpf, modelo, franquia, valor, created_at
-            FROM propostas
-            ORDER BY created_at DESC
-            LIMIT 50;
-        """)
-        rows = cur.fetchall()
-
-    out = []
-    for r in rows:
-        out.append({
-            "id": str(r[0]),
-            "cliente": r[1],
-            "cpf": r[2],
-            "modelo": r[3],
-            "franquia": int(r[4]),
-            "valor": Decimal(str(r[5])),
-            "created_at": r[6],
-        })
-    return out
-
-def obter_pdf_proposta(pid):
-    ensure_schema()
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT pdf FROM propostas WHERE id=%s;", (pid,))
-        row = cur.fetchone()
-        return row[0] if row else None
-
-def deletar_proposta(pid):
-    ensure_schema()
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM propostas WHERE id=%s;", (pid,))
-
-def limpar_propostas_expiradas(dias=10):
-    ensure_schema()
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"DELETE FROM propostas WHERE created_at < NOW() - INTERVAL '{int(dias)} days';")
-
-# ----------------------------
-# Utils: texto / datas / números
-# ----------------------------
+# -----------------------------
+# Helpers: formatação e parsing
+# -----------------------------
 MESES = [
-    "janeiro","fevereiro","março","abril","maio","junho",
-    "julho","agosto","setembro","outubro","novembro","dezembro"
+    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
 ]
 
-def now_br():
-    return datetime.now(TZ_BR)
+UNIDADES = ["zero", "um", "dois", "três", "quatro", "cinco", "seis", "sete", "oito", "nove"]
+DEZ_A_DEZENOVE = ["dez", "onze", "doze", "treze", "quatorze", "quinze", "dezesseis", "dezessete", "dezoito", "dezenove"]
+DEZENAS = ["", "", "vinte", "trinta", "quarenta", "cinquenta", "sessenta", "setenta", "oitenta", "noventa"]
+CENTENAS = ["", "cento", "duzentos", "trezentos", "quatrocentos", "quinhentos", "seiscentos", "setecentos", "oitocentos", "novecentos"]
 
-def data_extenso(dt: date):
-    return f"{dt.day} de {MESES[dt.month-1]} de {dt.year}"
 
-def data_extenso_por_digitos(s: str):
-    """
-    Aceita:
-    - "20022026"
-    - "20/02/2026"
-    - "20-02-2026"
-    - "20/02/26"
-    """
+def capitalizar_primeira(s: str) -> str:
     s = (s or "").strip()
-    if not s:
-        raise ValueError("Data vazia")
+    return s[:1].upper() + s[1:] if s else ""
 
-    digits = re.sub(r"\D", "", s)  # só números
 
-    if len(digits) == 8:
-        dd = int(digits[0:2])
-        mm = int(digits[2:4])
-        yyyy = int(digits[4:8])
-    elif len(digits) == 6:
-        dd = int(digits[0:2])
-        mm = int(digits[2:4])
-        yy = int(digits[4:6])
-        yyyy = 2000 + yy
-    else:
-        raise ValueError("Data inválida")
+def formatar_inteiro_ptbr(n: int) -> str:
+    # 1000 -> 1.000
+    return f"{n:,}".replace(",", ".")
 
-    dt = date(yyyy, mm, dd)
-    return data_extenso(dt)
 
-def format_brl(valor: Decimal):
-    # 200.00 -> "200,00"
-    s = f"{valor:.2f}"
-    return s.replace(".", ",")
+def formatar_decimal_ptbr(d: Decimal) -> str:
+    d = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    s = f"{d:,.2f}"  # 1,234.56
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
-UNIDADES = ["zero","um","dois","três","quatro","cinco","seis","sete","oito","nove"]
-DEZ_A_DEZENOVE = ["dez","onze","doze","treze","quatorze","quinze","dezesseis","dezessete","dezoito","dezenove"]
-DEZENAS = ["","dez","vinte","trinta","quarenta","cinquenta","sessenta","setenta","oitenta","noventa"]
-CENTENAS = ["","cem","cento","duzentos","trezentos","quatrocentos","quinhentos","seiscentos","setecentos","oitocentos","novecentos"]
-
-def numero_por_extenso_ate_999(n: int):
-    if n < 0 or n > 999:
-        raise ValueError("fora do range 0-999")
-    if n < 10:
-        return UNIDADES[n]
-    if 10 <= n < 20:
-        return DEZ_A_DEZENOVE[n-10]
-    if n < 100:
-        d = n // 10
-        u = n % 10
-        if u == 0:
-            return DEZENAS[d]
-        return f"{DEZENAS[d]} e {UNIDADES[u]}"
-    # 100-999
-    if n == 100:
-        return "cem"
-    c = n // 100
-    resto = n % 100
-    if resto == 0:
-        return CENTENAS[c]
-    return f"{CENTENAS[c]} e {numero_por_extenso_ate_999(resto)}"
-
-def numero_por_extenso(n: int):
-    # suficiente pra franquia e valores mensais do seu caso
-    if n < 0:
-        return "zero"
-    if n <= 999:
-        return numero_por_extenso_ate_999(n)
-    if n <= 999999:
-        mil = n // 1000
-        resto = n % 1000
-        mil_txt = "mil" if mil == 1 else f"{numero_por_extenso_ate_999(mil)} mil"
-        if resto == 0:
-            return mil_txt
-        # regra simples com "e" para português
-        conj = " e " if resto < 100 else " "
-        return f"{mil_txt}{conj}{numero_por_extenso_ate_999(resto)}"
-    return str(n)
 
 def parse_valor_decimal(s: str) -> Decimal:
-    s = (s or "").strip()
-    s = s.replace("R$", "").strip()
-    s = s.replace(".", "").replace(",", ".")
-    try:
-        v = Decimal(s)
-        return v.quantize(Decimal("0.01"))
-    except (InvalidOperation, ValueError):
+    if s is None:
         raise ValueError("Valor inválido")
+    s = s.strip()
+    if not s:
+        raise ValueError("Valor inválido")
+    s = s.replace("R$", "").replace("r$", "").replace(" ", "")
+    # PT-BR: vírgula é decimal; ponto é milhar
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    if not re.fullmatch(r"-?\d+(\.\d+)?", s):
+        raise ValueError("Valor inválido")
+    return Decimal(s).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-# ----------------------------
-# Utils: DOCX placeholder replace (body + tables + header/footer)
-# ----------------------------
-def iter_paragraphs(container):
+
+def parse_int(s: str) -> int:
+    digits = re.sub(r"\D", "", s or "")
+    if not digits:
+        raise ValueError("Número inválido")
+    return int(digits)
+
+
+def parse_data_digitos(s: str) -> date:
     """
-    Retorna todos os parágrafos de:
-    - Document / _Cell / Header / Footer
-    incluindo os parágrafos dentro de tabelas.
+    Aceita:
+      - 20022026 (DDMMAAAA)
+      - 20/02/2026
+      - 200226 (DDMMAA) -> assume 20AA
+      - 20/02/26
     """
-    # parágrafos diretos
-    for p in getattr(container, "paragraphs", []):
+    digits = re.sub(r"\D", "", s or "")
+    if len(digits) == 8:
+        dd = int(digits[0:2]); mm = int(digits[2:4]); yyyy = int(digits[4:8])
+    elif len(digits) == 6:
+        dd = int(digits[0:2]); mm = int(digits[2:4]); yy = int(digits[4:6])
+        yyyy = 2000 + yy
+    else:
+        raise ValueError("Data inválida (use DDMMAAAA)")
+    return date(yyyy, mm, dd)
+
+
+def data_por_extenso(d: date, mes_capitalizado: bool = False) -> str:
+    mes = MESES[d.month - 1]
+    if mes_capitalizado:
+        mes = mes[:1].upper() + mes[1:]
+    return f"{d.day} de {mes} de {d.year}"
+
+
+def somente_digitos(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
+
+
+def formatar_cpf_cnpj(raw: str) -> str:
+    d = somente_digitos(raw)
+    if len(d) == 11:  # CPF
+        return f"{d[0:3]}.{d[3:6]}.{d[6:9]}-{d[9:11]}"
+    if len(d) == 14:  # CNPJ
+        return f"{d[0:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:14]}"
+    return raw.strip()
+
+
+def numero_por_extenso(n: int) -> str:
+    if n < 0:
+        return "menos " + numero_por_extenso(-n)
+    if n < 10:
+        return UNIDADES[n]
+    if n < 20:
+        return DEZ_A_DEZENOVE[n - 10]
+    if n < 100:
+        dez = n // 10
+        uni = n % 10
+        if uni == 0:
+            return DEZENAS[dez]
+        return f"{DEZENAS[dez]} e {UNIDADES[uni]}"
+    if n == 100:
+        return "cem"
+    if n < 1000:
+        cen = n // 100
+        rest = n % 100
+        if rest == 0:
+            return "cem" if cen == 1 else CENTENAS[cen]
+        return f"{CENTENAS[cen]} e {numero_por_extenso(rest)}"
+    if n < 1_000_000:
+        mil = n // 1000
+        rest = n % 1000
+        mil_txt = "um mil" if mil == 1 else f"{numero_por_extenso(mil)} mil"
+        if rest == 0:
+            return mil_txt
+        conj = " e " if rest < 100 else " "
+        return f"{mil_txt}{conj}{numero_por_extenso(rest)}"
+    if n < 1_000_000_000:
+        milhao = n // 1_000_000
+        rest = n % 1_000_000
+        milhao_txt = "um milhão" if milhao == 1 else f"{numero_por_extenso(milhao)} milhões"
+        if rest == 0:
+            return milhao_txt
+        conj = " e " if rest < 100 else " "
+        return f"{milhao_txt}{conj}{numero_por_extenso(rest)}"
+    bilhao = n // 1_000_000_000
+    rest = n % 1_000_000_000
+    bilhao_txt = "um bilhão" if bilhao == 1 else f"{numero_por_extenso(bilhao)} bilhões"
+    if rest == 0:
+        return bilhao_txt
+    conj = " e " if rest < 100 else " "
+    return f"{bilhao_txt}{conj}{numero_por_extenso(rest)}"
+
+
+def valor_por_extenso_reais(d: Decimal) -> str:
+    d = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if d < 0:
+        return "menos " + valor_por_extenso_reais(-d)
+    reais = int(d // 1)
+    centavos = int((d - Decimal(reais)) * 100)
+
+    if reais == 0:
+        reais_txt = "zero real" if centavos == 0 else "zero reais"
+    elif reais == 1:
+        reais_txt = "um real"
+    else:
+        reais_txt = f"{numero_por_extenso(reais)} reais"
+
+    if centavos == 0:
+        return reais_txt
+
+    if centavos == 1:
+        cent_txt = "um centavo"
+    else:
+        cent_txt = f"{numero_por_extenso(centavos)} centavos"
+
+    return f"{reais_txt} e {cent_txt}"
+
+
+# -----------------------------
+# Helpers: DOCX replace (python-docx)
+# -----------------------------
+def _replace_in_paragraph(paragraph, replacements: dict):
+    """
+    replacements: {placeholder_string: value_string}
+    Faz replace mesmo que o placeholder esteja quebrado em vários runs.
+    """
+    if not paragraph.runs:
+        return
+
+    for placeholder, value in replacements.items():
+        while True:
+            full_text = "".join(r.text for r in paragraph.runs)
+            if placeholder not in full_text:
+                break
+
+            start = full_text.find(placeholder)
+            end = start + len(placeholder)
+
+            # map runs
+            run_starts = []
+            pos = 0
+            for r in paragraph.runs:
+                run_starts.append(pos)
+                pos += len(r.text)
+
+            start_run = None
+            end_run = None
+            for i, start_pos in enumerate(run_starts):
+                run_end = start_pos + len(paragraph.runs[i].text)
+                if start_run is None and start < run_end:
+                    start_run = i
+                if start_run is not None and end <= run_end:
+                    end_run = i
+                    break
+
+            if start_run is None:
+                break
+            if end_run is None:
+                end_run = len(paragraph.runs) - 1
+
+            start_pos = run_starts[start_run]
+            # prefix in first run
+            prefix = paragraph.runs[start_run].text[: max(0, start - start_pos)]
+            # suffix in last run
+            suffix = paragraph.runs[end_run].text[max(0, end - run_starts[end_run]):]
+
+            paragraph.runs[start_run].text = prefix + value + suffix
+            for j in range(start_run + 1, end_run + 1):
+                paragraph.runs[j].text = ""
+
+
+def _iter_all_paragraphs(doc: Document):
+    # body
+    for p in doc.paragraphs:
         yield p
-    # tabelas
-    for t in getattr(container, "tables", []):
+    # tables
+    for t in doc.tables:
         for row in t.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     yield p
-                # tabelas aninhadas
-                for p in iter_paragraphs(cell):
-                    yield p
-
-def iter_all_paragraphs(doc: Document):
-    # body
-    for p in iter_paragraphs(doc):
-        yield p
-    # header/footer
+    # headers/footers
     for sec in doc.sections:
-        for p in iter_paragraphs(sec.header):
+        for p in sec.header.paragraphs:
             yield p
-        for p in iter_paragraphs(sec.footer):
+        for t in sec.header.tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        yield p
+        for p in sec.footer.paragraphs:
             yield p
+        for t in sec.footer.tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        yield p
 
-def replace_placeholders(doc: Document, mapping: dict):
+
+def replace_text_in_doc(doc: Document, context: dict):
     """
-    Substitui placeholders como {{ NOME }} preservando o estilo principal do parágrafo.
-    Funciona mesmo quando o Word quebra em vários "runs".
+    Substitui {{ KEY }} e variantes.
     """
-    for p in iter_all_paragraphs(doc):
-        full = "".join(run.text for run in p.runs)
-        if "{{" not in full:
+    replacements = {}
+    for k, v in context.items():
+        if v is None:
+            v = ""
+        if not isinstance(v, str):
+            v = str(v)
+        replacements[f"{{{{ {k} }}}}"] = v
+        replacements[f"{{{{{k}}}}}"] = v
+        replacements[f"{{{{ {k}}}}}"] = v
+        replacements[f"{{{{{k} }}}}"] = v
+
+    for p in _iter_all_paragraphs(doc):
+        _replace_in_paragraph(p, replacements)
+
+
+def replace_image_placeholder(doc: Document, key: str, image_path: str, max_w_mm: float = 120, max_h_mm: float = 45):
+    """
+    Procura {{ IMAGEM }} e insere a imagem mantendo proporção,
+    encaixando em max_w_mm x max_h_mm.
+    """
+    placeholder_variants = [
+        f"{{{{ {key} }}}}",
+        f"{{{{{key}}}}}",
+        f"{{{{ {key}}}}}",
+        f"{{{{{key} }}}}",
+    ]
+
+    img = Image.open(image_path)
+    w_px, h_px = img.size
+    scale = min(max_w_mm / w_px, max_h_mm / h_px)
+    w_mm = w_px * scale
+    h_mm = h_px * scale
+
+    for p in _iter_all_paragraphs(doc):
+        full_text = "".join(r.text for r in p.runs)
+        found = None
+        for ph in placeholder_variants:
+            if ph in full_text:
+                found = ph
+                break
+        if not found:
             continue
 
-        new_full = full
-        for k, v in mapping.items():
-            new_full = new_full.replace(k, str(v))
-
-        if new_full == full:
-            continue
-
-        # mantém estilo do primeiro run
-        if p.runs:
-            p.runs[0].text = new_full
-            for r in p.runs[1:]:
-                r.text = ""
-        else:
-            p.add_run(new_full)
-
-def insert_image_at_placeholder(doc: Document, placeholder: str, image_path: str, width_inches: float = 4.8):
-    """
-    Insere imagem onde encontrar o placeholder (em body/tables/header/footer).
-    width_inches controlado para evitar virar 2 páginas.
-    """
-    if not image_path or not os.path.exists(image_path):
-        return
-
-    for p in iter_all_paragraphs(doc):
-        full = "".join(run.text for run in p.runs)
-        if placeholder not in full:
-            continue
-
-        # remove placeholder do texto
-        new_full = full.replace(placeholder, "").strip()
-        if p.runs:
-            p.runs[0].text = new_full
-            for r in p.runs[1:]:
-                r.text = ""
-        else:
-            p.add_run(new_full)
-
-        # insere imagem no mesmo parágrafo
+        # remove placeholder
+        _replace_in_paragraph(p, {found: ""})
+        # add picture
         run = p.add_run()
-        run.add_picture(image_path, width=Inches(width_inches))
+        run.add_picture(image_path, width=Mm(w_mm), height=Mm(h_mm))
+        return  # só 1 vez
 
-        # reduz espaçamento (ajuda a não estourar página)
-        try:
-            p.paragraph_format.space_before = 0
-            p.paragraph_format.space_after = 0
-        except Exception:
-            pass
 
-# ----------------------------
-# Utils: DOCX -> PDF (LibreOffice)
-# ----------------------------
-def docx_para_pdf(docx_path: str, out_dir: str) -> str:
-    subprocess.run(
-        ["soffice", "--headless", "--nologo", "--nolockcheck",
-         "--convert-to", "pdf", "--outdir", out_dir, docx_path],
-        check=True
-    )
-    base = os.path.splitext(os.path.basename(docx_path))[0]
-    pdf_path = os.path.join(out_dir, base + ".pdf")
-    return pdf_path
+# -----------------------------
+# Helpers: PDF conversion
+# -----------------------------
+def docx_to_pdf_bytes(docx_path: str) -> bytes:
+    """
+    Converte DOCX -> PDF usando LibreOffice (soffice).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proc = subprocess.run(
+            [
+                "soffice",
+                "--headless",
+                "--nologo",
+                "--nolockcheck",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                tmpdir,
+                docx_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"Falha ao converter para PDF:\n{proc.stdout}")
 
-# ----------------------------
-# Rotas
-# ----------------------------
+        base = os.path.splitext(os.path.basename(docx_path))[0]
+        pdf_path = os.path.join(tmpdir, base + ".pdf")
+        if not os.path.exists(pdf_path):
+            # fallback
+            pdfs = [p for p in os.listdir(tmpdir) if p.lower().endswith(".pdf")]
+            if not pdfs:
+                raise RuntimeError("PDF não foi gerado pelo LibreOffice.")
+            pdf_path = os.path.join(tmpdir, pdfs[0])
+
+        with open(pdf_path, "rb") as f:
+            return f.read()
+
+
+# -----------------------------
+# Database
+# -----------------------------
+def get_database_url() -> str | None:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return None
+    # psycopg2 às vezes reclama com postgres://
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    return url
+
+
+def db_conn():
+    url = get_database_url()
+    if not url:
+        raise RuntimeError("DATABASE_URL não encontrada (adicione o PostgreSQL no Railway).")
+    conn = psycopg2.connect(url)
+    conn.autocommit = True
+    return conn
+
+
+def ensure_schema():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS propostas (
+            id SERIAL PRIMARY KEY,
+            cliente TEXT NOT NULL,
+            cpf TEXT NOT NULL,
+            modelo TEXT NOT NULL,
+            franquia INTEGER NOT NULL,
+            valor NUMERIC(12,2) NOT NULL,
+            pdf BYTEA NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """)
+        # garantir colunas (caso tabela antiga)
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS pdf BYTEA;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS valor NUMERIC(12,2);")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS franquia INTEGER;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS cliente TEXT;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS cpf TEXT;")
+        cur.execute("ALTER TABLE propostas ADD COLUMN IF NOT EXISTS modelo TEXT;")
+
+
+def limpar_propostas_expiradas():
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM propostas WHERE created_at < NOW() - INTERVAL %s;",
+            (f"{RETENCAO_DIAS} days",),
+        )
+
+
+def salvar_proposta(cliente: str, cpf: str, modelo: str, franquia: int, valor: Decimal, pdf_bytes: bytes) -> int:
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO propostas (cliente, cpf, modelo, franquia, valor, pdf, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            RETURNING id;
+            """,
+            (cliente, cpf, modelo, franquia, valor, psycopg2.Binary(pdf_bytes)),
+        )
+        return int(cur.fetchone()[0])
+
+
+def listar_propostas(limit: int = 50):
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, cliente, cpf, modelo, franquia, valor, created_at
+            FROM propostas
+            ORDER BY created_at DESC
+            LIMIT %s;
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def buscar_proposta_pdf(pid: int):
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT cliente, pdf FROM propostas WHERE id = %s;", (pid,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cliente, pdf = row
+        # pdf pode vir como memoryview
+        if isinstance(pdf, memoryview):
+            pdf = pdf.tobytes()
+        return {"cliente": cliente, "pdf": pdf}
+
+
+def buscar_proposta_dados(pid: int):
+    with db_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id, cliente, cpf, modelo, franquia, valor FROM propostas WHERE id = %s;",
+            (pid,),
+        )
+        return cur.fetchone()
+
+
+def deletar_proposta(pid: int):
+    with db_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM propostas WHERE id = %s;", (pid,))
+
+
+# -----------------------------
+# Routes
+# -----------------------------
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 @app.route("/proposta", methods=["GET", "POST"])
 def proposta():
     if request.method == "GET":
-        return render_template("proposta.html")
-
-    cliente = (request.form.get("cliente") or "").strip()
-    cpf = (request.form.get("cpf") or "").strip()
-    modelo = (request.form.get("modelo") or "").strip()
-    franquia = (request.form.get("franquia") or "").strip()
-    valor_in = (request.form.get("valor") or "").strip()
-
-    if not all([cliente, cpf, modelo, franquia, valor_in]):
-        flash("Preencha todos os campos.")
-        return redirect(url_for("proposta"))
+        return render_template("proposta.html", error=None)
 
     try:
-        franquia_int = int(re.sub(r"\D", "", franquia))
-    except Exception:
-        flash("Franquia inválida.")
-        return redirect(url_for("proposta"))
+        cliente = (request.form.get("cliente") or "").strip()
+        cpf_raw = (request.form.get("cpf") or "").strip()
+        modelo = (request.form.get("modelo") or "").strip()
+        franquia = parse_int(request.form.get("franquia") or "")
+        valor = parse_valor_decimal(request.form.get("valor") or "")
 
-    try:
-        valor_decimal = parse_valor_decimal(valor_in)
-    except Exception:
-        flash("Valor inválido.")
-        return redirect(url_for("proposta"))
+        if not cliente or not cpf_raw or not modelo:
+            raise ValueError("Preencha cliente, CPF/CNPJ e modelo.")
 
-    valor_fmt = f"R$ {format_brl(valor_decimal)} ({numero_por_extenso(int(valor_decimal))} reais)"
+        cpf_digits = somente_digitos(cpf_raw)
 
-    # imagem opcional
-    img_file = request.files.get("imagem")
-    img_tmp_path = None
-    if img_file and img_file.filename:
-        ext = os.path.splitext(img_file.filename)[1].lower()
-        if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
-            flash("Imagem inválida (use PNG/JPG/WEBP).")
-            return redirect(url_for("proposta"))
-        fd, img_tmp_path = tempfile.mkstemp(suffix=ext)
-        os.close(fd)
-        img_file.save(img_tmp_path)
+        imagem_file = request.files.get("imagem")
+        if not imagem_file or not imagem_file.filename:
+            raise ValueError("Anexe a imagem do equipamento.")
 
-    # template proposta
-    template_path = os.path.join(os.getcwd(), "template.docx")
-    if not os.path.exists(template_path):
-        # caso seu template tenha outro nome, ajuste aqui
-        template_path = os.path.join(os.getcwd(), "proposta_template.docx")
+        filename = secure_filename(imagem_file.filename)
+        ext = os.path.splitext(filename)[1].lower() or ".png"
 
-    if not os.path.exists(template_path):
-        flash("Template da proposta não encontrado (template.docx).")
-        return redirect(url_for("proposta"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_path = os.path.join(tmpdir, "equipamento" + ext)
+            imagem_file.save(img_path)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        doc = Document(template_path)
+            doc = Document(PROPOSTA_TEMPLATE)
+            hoje = datetime.now(APP_TZ).date()
 
-        hoje = now_br().date()
-        mapping = {
-            "{{ CLIENTE }}": cliente,
-            "{{ CPF }}": cpf,
-            "{{ MODELO }}": modelo,
-            "{{ FRANQUIA }}": str(franquia_int),
-            "{{ FRANQUIA_EXTENSO }}": numero_por_extenso(franquia_int),
-            "{{ VALOR }}": valor_fmt,
-            "{{ DATA }}": data_extenso(hoje),  # data do topo (se estiver no header)
-        }
+            ctx = {
+                "CLIENTE": cliente,
+                "CPF": formatar_cpf_cnpj(cpf_digits),
+                "MODELO": modelo,
+                "FRANQUIA": str(franquia),
+                "VALOR": f"R$ {formatar_decimal_ptbr(valor)} ({capitalizar_primeira(valor_por_extenso_reais(valor))})",
+                "DATA": data_por_extenso(hoje, mes_capitalizado=True),
+            }
 
-        replace_placeholders(doc, mapping)
+            replace_text_in_doc(doc, ctx)
+            replace_image_placeholder(doc, "IMAGEM", img_path, max_w_mm=120, max_h_mm=45)
 
-        # imagem (se o template tiver {{ IMAGEM }})
-        if img_tmp_path:
-            insert_image_at_placeholder(doc, "{{ IMAGEM }}", img_tmp_path, width_inches=4.8)
+            docx_out = os.path.join(tmpdir, "proposta_gerada.docx")
+            doc.save(docx_out)
+            pdf_bytes = docx_to_pdf_bytes(docx_out)
 
-        docx_out = os.path.join(tmp, "proposta_gerada.docx")
-        doc.save(docx_out)
+        try:
+            ensure_schema()
+            salvar_proposta(cliente, cpf_digits, modelo, franquia, valor, pdf_bytes)
+        except Exception:
+            pass
 
-        pdf_out = docx_para_pdf(docx_out, tmp)
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"Proposta ({cliente}).pdf",
+        )
 
-        with open(pdf_out, "rb") as f:
-            pdf_bytes = f.read()
+    except Exception as e:
+        return render_template("proposta.html", error=str(e))
 
-    # salva no banco com valor NUMÉRICO (sem texto)
-    pid = salvar_proposta(cliente, cpf, modelo, franquia_int, valor_decimal, pdf_bytes)
-
-    filename = f"Proposta {cliente}.pdf"
-    return send_file(
-        io.BytesIO(pdf_bytes),
-        mimetype="application/pdf",
-        as_attachment=True,
-        download_name=filename
-    )
 
 @app.route("/contrato", methods=["GET", "POST"])
 def contrato():
-    prefill = {
-        "denominacao": request.args.get("cliente", ""),
-        "cpf": request.args.get("cpf", ""),
-        "equipamento": request.args.get("modelo", ""),
-        "franquia": request.args.get("franquia", ""),
-        "valor": request.args.get("valor", ""),
-    }
+    prefill = {}
+    proposta_id = request.args.get("proposta_id")
+    if proposta_id:
+        try:
+            pid = int(proposta_id)
+            row = buscar_proposta_dados(pid)
+            if row:
+                prefill = {
+                    "denominacao": row["cliente"],
+                    "cpf_cnpj": row["cpf"],
+                    "equipamento": row["modelo"],
+                    "franquia": str(row["franquia"]),
+                    "valor_mensal": str(row["valor"]),
+                }
+        except Exception:
+            prefill = {}
 
     if request.method == "GET":
-        return render_template("contrato.html", prefill=prefill)
-
-    denominacao = (request.form.get("denominacao") or "").strip()
-    cpf = (request.form.get("cpf") or "").strip()
-    endereco = (request.form.get("endereco") or "").strip()
-    telefone = (request.form.get("telefone") or "").strip()
-    email = (request.form.get("email") or "").strip()
-    equipamento = (request.form.get("equipamento") or "").strip()
-    acessorios = (request.form.get("acessorios") or "").strip()
-    data_inicio_in = (request.form.get("data_inicio") or "").strip()
-    data_termino_in = (request.form.get("data_termino") or "").strip()
-    franquia_in = (request.form.get("franquia") or "").strip()
-    valor_in = (request.form.get("valor") or "").strip()
-
-    if not all([denominacao, cpf, endereco, telefone, email, equipamento, data_inicio_in, data_termino_in, franquia_in, valor_in]):
-        flash("Preencha todos os campos do contrato.")
-        return redirect(url_for("contrato"))
+        return render_template("contrato.html", prefill=prefill, error=None)
 
     try:
-        data_inicio = data_extenso_por_digitos(data_inicio_in)
-        data_termino = data_extenso_por_digitos(data_termino_in)
-    except Exception:
-        flash("Data inválida. Digite só números (ex: 20022026) ou com /.")
-        return redirect(url_for("contrato"))
+        denominacao = (request.form.get("denominacao") or "").strip()
+        cpf_cnpj_raw = (request.form.get("cpf_cnpj") or "").strip()
+        endereco = (request.form.get("endereco") or "").strip()
+        telefone = (request.form.get("telefone") or "").strip()
+        email = (request.form.get("email") or "").strip()
+        equipamento = (request.form.get("equipamento") or "").strip()
+        acessorios = (request.form.get("acessorios") or "").strip()
+        data_inicio_raw = (request.form.get("data_inicio") or "").strip()
+        data_termino_raw = (request.form.get("data_termino") or "").strip()
+        franquia = parse_int(request.form.get("franquia") or "")
+        valor_mensal = parse_valor_decimal(request.form.get("valor_mensal") or "")
 
-    try:
-        franquia_int = int(re.sub(r"\D", "", franquia_in))
-    except Exception:
-        flash("Franquia inválida.")
-        return redirect(url_for("contrato"))
+        if not all([denominacao, cpf_cnpj_raw, endereco, telefone, email, equipamento, acessorios, data_inicio_raw, data_termino_raw]):
+            raise ValueError("Preencha todos os campos do contrato.")
 
-    try:
-        valor_decimal = parse_valor_decimal(valor_in)
-    except Exception:
-        flash("Valor inválido.")
-        return redirect(url_for("contrato"))
+        di = parse_data_digitos(data_inicio_raw)
+        dt = parse_data_digitos(data_termino_raw)
+        hoje = datetime.now(APP_TZ).date()
 
-    franquia_formatada = f"{franquia_int}"
-    franquia_extenso = numero_por_extenso(franquia_int)
+        cpf_digits = somente_digitos(cpf_cnpj_raw)
 
-    valor_mensal_formatado = format_brl(valor_decimal)
-    valor_mensal_extenso = f"{numero_por_extenso(int(valor_decimal))} reais"
-
-    data_assinatura = data_extenso(now_br().date())
-
-    template_path = os.path.join(os.getcwd(), "contrato_template.docx")
-    if not os.path.exists(template_path):
-        flash("Template do contrato não encontrado (contrato_template.docx).")
-        return redirect(url_for("contrato"))
-
-    with tempfile.TemporaryDirectory() as tmp:
-        doc = Document(template_path)
-        mapping = {
-            "{{ DENOMINACAO }}": denominacao,
-            "{{ CPF }}": cpf,
-            "{{ ENDERECO }}": endereco,
-            "{{ TELEFONE }}": telefone,
-            "{{ EMAIL }}": email,
-            "{{ EQUIPAMENTO }}": equipamento,
-            "{{ ACESSORIOS }}": acessorios,
-
-            "{{ DATA_INICIO }}": data_inicio,
-            "{{ DATA_TERMINO }}": data_termino,
-
-            "{{ FRANQUIA_FORMATADA }}": franquia_formatada,
-            "{{ FRANQUIA_EXTENSO }}": franquia_extenso,
-
-            "{{ VALOR_MENSAL_FORMATADO }}": valor_mensal_formatado,
-            "{{ VALOR_MENSAL_EXTENSO }}": valor_mensal_extenso,
-
-            "{{ DATA_ASSINATURA }}": data_assinatura,
+        doc = Document(CONTRATO_TEMPLATE)
+        ctx = {
+            "DENOMINACAO": denominacao,
+            "CPF_CNPJ": " " + formatar_cpf_cnpj(cpf_digits),
+            "ENDERECO": " " + endereco,
+            "TELEFONE": " " + telefone,
+            "EMAIL": " " + email,
+            "EQUIPAMENTO": equipamento,
+            "ACESSORIOS": acessorios,
+            "DATA_INICIO": data_por_extenso(di, mes_capitalizado=False),
+            "DATA_TERMINO": data_por_extenso(dt, mes_capitalizado=False),
+            "FRANQUIA_FORMATADA": formatar_inteiro_ptbr(franquia),
+            "FRANQUIA_EXTENSO": numero_por_extenso(franquia),
+            "VALOR_MENSAL_FORMATADO": formatar_decimal_ptbr(valor_mensal),
+            "VALOR_MENSAL_EXTENSO": valor_por_extenso_reais(valor_mensal),
+            "DATA_ASSINATURA": data_por_extenso(hoje, mes_capitalizado=False),
         }
+        replace_text_in_doc(doc, ctx)
 
-        replace_placeholders(doc, mapping)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_out = os.path.join(tmpdir, "contrato_gerado.docx")
+            doc.save(docx_out)
+            pdf_bytes = docx_to_pdf_bytes(docx_out)
 
-        docx_out = os.path.join(tmp, "contrato_gerado.docx")
-        doc.save(docx_out)
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"Contrato ({denominacao}).pdf",
+        )
 
-        pdf_out = docx_para_pdf(docx_out, tmp)
-        with open(pdf_out, "rb") as f:
-            pdf_bytes = f.read()
+    except Exception as e:
+        prefill_post = dict(request.form)
+        return render_template("contrato.html", prefill=prefill_post, error=str(e))
 
-    filename = f"Contrato {denominacao}.pdf"
-    return send_file(
-        io.BytesIO(pdf_bytes),
-        mimetype="application/pdf",
-        as_attachment=True,
-        download_name=filename
-    )
 
 @app.route("/recentes")
 def recentes():
-    limpar_propostas_expiradas(dias=10)
-    propostas = listar_propostas()
+    try:
+        ensure_schema()
+        limpar_propostas_expiradas()
+        propostas = listar_propostas()
+        return render_template("recentes.html", propostas=propostas, error=None)
+    except Exception as e:
+        return render_template("recentes.html", propostas=[], error=str(e))
 
-    # formata valor pra tela
-    for p in propostas:
-        p["valor_fmt"] = f"R$ {format_brl(p['valor'])}"
-        try:
-            p["created_fmt"] = p["created_at"].astimezone(TZ_BR).strftime("%d/%m/%Y %H:%M")
-        except Exception:
-            p["created_fmt"] = str(p["created_at"])
 
-    return render_template("recentes.html", propostas=propostas)
+@app.route("/propostas/<int:pid>/pdf")
+def proposta_pdf(pid: int):
+    row = buscar_proposta_pdf(pid)
+    if not row:
+        return "Proposta não encontrada.", 404
 
-@app.route("/recentes/<pid>/pdf")
-def recentes_pdf(pid):
-    pdf = obter_pdf_proposta(pid)
-    if not pdf:
-        return "PDF não encontrado", 404
+    download = request.args.get("download") == "1"
+    cliente = row["cliente"] or "cliente"
+    pdf_bytes = row["pdf"]
 
     return send_file(
-        io.BytesIO(pdf),
+        io.BytesIO(pdf_bytes),
         mimetype="application/pdf",
-        as_attachment=True,
-        download_name=f"Proposta {pid}.pdf"
+        as_attachment=download,
+        download_name=f"Proposta ({cliente}).pdf",
     )
 
-@app.route("/recentes/<pid>/delete", methods=["POST"])
-def recentes_delete(pid):
-    deletar_proposta(pid)
+
+@app.route("/propostas/<int:pid>/delete", methods=["POST"])
+def proposta_delete(pid: int):
+    try:
+        deletar_proposta(pid)
+    except Exception:
+        pass
     return redirect(url_for("recentes"))
 
-@app.route("/recentes/<pid>/contrato")
-def recentes_contrato(pid):
-    # puxa dados da proposta pra pré-preencher o contrato
-    ensure_schema()
-    with db_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            SELECT cliente, cpf, modelo, franquia, valor
-            FROM propostas WHERE id=%s
-        """, (pid,))
-        row = cur.fetchone()
 
-    if not row:
-        return "Proposta não encontrada", 404
-
-    cliente, cpf, modelo, franquia, valor = row
-    return redirect(url_for(
-        "contrato",
-        cliente=cliente,
-        cpf=cpf,
-        modelo=modelo,
-        franquia=str(franquia),
-        valor=str(valor)
-    ))
-
-# ----------------------------
-# Main
-# ----------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port)
